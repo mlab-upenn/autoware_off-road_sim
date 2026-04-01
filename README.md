@@ -208,7 +208,7 @@ The active control source is shown in the terminal status line:
 
 ### Step 1 — Switch vehicle to ROS2_CONTROL mode
 
-Click inside the Isaac Sim viewport, then hold `1` (Ego) or `2` (Opponent) for ≥1 second until the terminal status line shows `[ROS2_CONTROL]`.
+Click inside the Isaac Sim viewport, then hold `1` (Ego) or `2` (Opponent) for ≥1 second until the HUD shows `CONTROL:KEYBOARD` -> `CONTROL:ROS2`.
 
 ### Step 2 — Publishing an Autoware or RoboRacer control command
 
