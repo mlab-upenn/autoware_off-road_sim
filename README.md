@@ -76,7 +76,9 @@ Inside the container:
 
     /root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config <path-to-config>
 
-Example: Run RoboRacer-Max on pumptrack_simple demo
+Configuration files are located in the `scripts/configs` directory. 
+
+Example: To run RoboRacer-Max on pumptrack_simple demo
 ```bash
 /root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config scripts/configs/pumptrack_simple_config.yaml
 ```
@@ -151,8 +153,6 @@ frame_ids_to_remap:
 ```
 
 Topics in `topics_to_remap` are rewritten at launch time by prepending each vehicle's `topic_prefix` (e.g. `/imu` → `/ego/imu`). Frame IDs in `frame_ids_to_remap` are rewritten to `<prefix>/<frame>` (e.g. `odom` → `ego/odom`). The USD file does not need to be modified.
-
-
 
 ---
 
@@ -406,7 +406,7 @@ semantic_segmentation:
 
 ### Semantic labelling
 
-Environment Mesh prims are labelled by matching their prim name against the `id_keywords` list. The `"default"` keyword acts as the catch-all for any prim that does not match a more specific keyword. Vehicle prims are never labelled (they are excluded from traversal).
+Environment Mesh prims are labelled by matching their prim name against the `id_keywords` list. The `"default"` keyword acts as the catch-all for any prim that does not match a more specific keyword.
 
 ### Output structure
 
@@ -450,7 +450,6 @@ data/
 |---|---|
 | `scripts/launch_sim.py` | Main simulation launcher (load USD, spawn vehicles, start keyboard control, record segmentation) |
 | `scripts/gnss_bridge.py` | Python 3.10 subprocess that publishes `sensor_msgs/NavSatFix` via rclpy (spawned automatically) |
-| `scripts/configs/pumptrack_simple_config.yaml` | Config for the pumptrack_simple environment |
 
 ---
 
