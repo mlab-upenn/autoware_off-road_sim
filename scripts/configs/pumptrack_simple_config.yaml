@@ -1,0 +1,96 @@
+environment:
+  asset: "assets/environments/pumptrack_simple.usd"
+  scale: [0.01, 0.01, 0.01]
+  rotation_euler: [90.0, 0.0, -90.0]
+  translation: [0.0, 0.0, 0.0]
+
+physics_settings:
+  solver_type: "PGS"               # PGS (stable) or TGS (fast)
+  time_steps_per_second: 120       # Physics tick rate (Hz)
+
+viewport_settings:
+  render_resolution: [2560, 1440]
+  enable_DLSS_FPS_Multiplier_x2: false  # Automatically enable DLSS FPS_Multiplier x2
+
+keyboard_control_settings:
+  max_speed_m_s: 4.0
+  max_steer_rad: 0.52
+  acceleration_m_s2: 10.0
+  deceleration_m_s2: 10.0
+  steering_speed_rad_s: 3.0
+
+follow_camera:  
+  distance: 4.5     # Distance behind the vehicle (meters)
+  height: 1.5       # Camera height above ground (meters)
+  focus_height: 0.8 # Look-at target height on the vehicle (meters)
+
+vehicles:
+  - name: "Ego_Vehicle"
+    enabled: true
+    asset: "assets/vehicles/roboracer_max.usd"
+    topic_prefix: "/ego"
+    spawn_position: [0.0, 0.0, 0.0]
+    spawn_orientation: [0.0, 0.0, -90.0]
+    enable_camera: true
+    enable_lidar: true
+    enable_gnss: true
+
+  - name: "Opponent_Vehicle"
+    enabled: false
+    asset: "assets/vehicles/roboracer_max.usd"
+    topic_prefix: "/opponent"
+    spawn_position: [-2.0, 0.0, 0.0]
+    spawn_orientation: [0.0, 0.0, -90.0]
+    enable_camera: true
+    enable_lidar: true
+    enable_gnss: true
+
+# These are the hardcoded topic names baked into the USD.
+# launch_sim.py will remap them to /{topic_prefix}/{topic} for each vehicle.
+frame_ids_to_remap:
+  - "odom"
+  - "base_link"
+
+topics_to_remap:
+  - "/drive"
+  - "/imu"
+  - "/odom"
+  - "/point_cloud"
+  - "/rgb"
+
+gnss:
+  enabled: true
+  publish_rate_hz: 10
+  # GPS coordinate of the simulation world origin (0, 0, 0).
+  # Sim X axis points East; sim Y axis points North.
+  map_origin:
+    latitude: 39.984699     # degrees, positive = North
+    longitude: -75.226020   # degrees, positive = East
+    altitude: 0.0           # metres above WGS-84 ellipsoid
+  noise:
+    horizontal_stddev_m: 0.5   # 1-sigma horizontal error (East & North)
+    altitude_stddev_m: 1.0     # 1-sigma vertical error
+
+map_server:
+  enabled: true
+  resolution: 0.05       # meters per cell
+
+network_setup:
+  ros2_domain_id: 0
+  use_discovery_server: true
+  discovery_server_address: "127.0.0.1:11811"
+  force_tcp_transport: true
+
+semantic_segmentation:
+  id_keywords:
+    0: ["default"]       # non-drivable
+    1: ["track"]         # drivable
+  color_map:
+    0: [61, 93, 255]     # non-drivable  -> blue
+    1: [0, 255, 220]     # drivable      -> Cyan
+  capture_frequency: 8   # Hz → every (120Hz / 8Hz) = 15 frames
+  image_resolution: [1280, 720]
+  images_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/images"
+  gt_masks_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/gt_masks"
+  overwrite_existing: false
+

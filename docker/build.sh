@@ -8,4 +8,4 @@ cd "$SCRIPT_DIR/.."
 
 # Build the image
 echo "Building Docker image..."
-docker build -t roboracer_isaacsim:5.1 -f docker/Dockerfile .
+docker build -t autoware_off-road_sim:6.0 -f docker/Dockerfile .

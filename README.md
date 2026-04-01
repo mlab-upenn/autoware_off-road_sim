@@ -1,42 +1,506 @@
-# roboracer_isaacsim
+![Autoware Off-road Simulator](media/Autoware_Off-road_Sim.png)
 
-For best performance, use the following Rendering Settings(top-right corner in IsaacSim GUI):
-- DLSS
-    - Enable NVIDIA DLSS FPS Multiplier(2x-4x) 
-    - Set Mode to `Performance`
+# Autoware-RoboRacer Off-road Simulator
 
-Set the camera to `Camera -> DroneCamera` to see the roboracer in aerial view.
+The Autoware-RoboRacer Off-road Simulator is a multi-vehicle high-fidelity simulation framework for **Autoware** and **RoboRacer** off-road race cars, built on [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim) with **ROS 2 Humble** integration. This simulator was developed for the **Autoware Off-road** project to facilitate the training and evaluation of autonomous driving algorithms within off-road and racing ODDs. This research is part of an ongoing collaboration between the Autoware Off-road/Racing Working Group and the Autoware Center of Excellence (CoE) at the University of Pennsylvania.
 
-## Docker Setup (Source Build)
+The simulator features a **1/5th-scale RoboRacer-Max** model equipped with a comprehensive sensor suite: **3D LiDAR**, **RGB camera**, **GNSS**, **IMU**, and **odometry**. It includes a high-fidelity **pumptrack_simple** environment, featuring non-planar terrain specifically designed for challenging off-road testing. The framework facilitates **multi-vehicle configurations** via a versatile control interface that detects incoming **Autoware** and **RoboRacer** control message types, while supporting seamless **Hardware-in-the-Loop (HIL) testing** via FastDDS. Additional tools include a **semantic segmentation recorder** for perception training, built-in **keyboard teleoperation** for manual control, and an optimized launch and config system that is easy to use and ensures a perfect balance between simulation fidelity and real-time performance.
 
-This setup builds the environment based on Ubuntu 22.04 with ROS2 Humble.
-It clones the NVIDIA Isaac Sim 6.0 repository and builds it inside the Docker image. 
-To use 5.1 version, update the Dockerfile and remove `-b develop` when cloning the Isaac Sim repository.
+---
 
-### 1. Build Docker Image
+## Table of Contents
 
-This step compiles the Docker image and builds Isaac Sim from source (this takes time).
+1. [Prerequisites](#prerequisites)
+2. [Docker Setup](#docker-setup)
+3. [Running the Simulation](#running-the-simulation)
+4. [Keyboard Control](#keyboard-control)
+5. [ROS 2 Topics](#ros-2-topics)
+6. [Control Interface](#control-interface)
+7. [Multi-Vehicle Setup](#multi-vehicle-setup)
+8. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
+9. [Viewport & Rendering Tips](#viewport--rendering-tips)
+10. [Utility Scripts](#utility-scripts)
+11. [Troubleshooting](#troubleshooting)
+
+---
+
+## Prerequisites
+
+| Requirement | Version |
+|---|---|
+| NVIDIA GPU | RTX 4070+ recommended |
+| NVIDIA Driver | 580+ |
+| Docker | 24+ |
+| NVIDIA-Container-Toolkit | [1.14.0+](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| Host OS | Ubuntu 22.04+ (any Linux distro with X11 and NVIDIA driver support) |
+
+---
+
+## Docker Setup
+
+The container builds [NVIDIA Isaac Sim](https://github.com/isaac-sim/IsaacSim) from source alongside ROS 2 Humble. The first build takes 30–60 minutes.
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/mlab-upenn/autoware_off-road_sim
+cd autoware_off-road_sim
+```
+
+### 2. Build the Docker Image
 
 ```bash
 ./docker/build.sh
 ```
 
-### 2. Run Container
+> **Note:** `Isaac Sim 6.0 Early Developer Release` is built by default. To use `Isaac Sim 5.1`, edit `docker/Dockerfile` and remove `-b develop` from the `git clone` command.
 
-Once built, launch the container:
+### 3. Launch the Container
 
 ```bash
 ./docker/run.sh
 ```
-This script handles GPU access, X11 forwarding, and host networking.
 
-### 3. Run Isaac Sim
+This automatically:
+- Mounts the repo as `/workspace/autoware_off-road_sim`
+- Enables GPU access via `--runtime=nvidia`
+- Forwards X11 for the GUI
+- Sets the working directory to `/workspace/autoware_off-road_sim`
+
+---
+
+## Running the Simulation
+
+**Always use the custom Python interpreter** bundled with Isaac Sim — standard `python3` does not have the `omni.*` packages.
 
 Inside the container:
 
+    /root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config <path-to-config>
+
+Example: Run RoboRacer-Max on pumptrack_simple demo
 ```bash
-cd /root/isaacsim/_build/linux-x86_64/release
-./isaac-sim.sh
+/root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config scripts/configs/pumptrack_simple_config.yaml
 ```
 
-ROS 2 Humble is installed and sourced automatically.
+**Note:** Shader compilation takes several minutes on first launch. Once the status line `[KEYBOARD_CONTROL] ACTIVE: Ego_Vehicle | Spd=+0.00, Str=+0.00` appears in the terminal, the simulation is fully loaded and ready to use.
+
+**Note:** There are two `[Error] [omni.physicsschema.plugin] Joint body relationship points to a non existent prim, joint will not be created.` messages at launch. These errors do not affect the simulation and can be ignored for now.
+
+The launch script will:
+1. Load the environment USD asset
+2. Spawn all enabled vehicles from config with correct positions/orientations
+3. Remap all sensor topics per vehicle (no conflicts in multi-vehicle mode)
+4. Start the ROS 2 bridge
+5. Inject keyboard control via the ActionGraph
+
+---
+
+## Attach a New Terminal to a Running Container
+
+Outside the container at the **autoware_off-road_sim** directory:
+```bash
+./docker/attach.sh
+```
+
+This automatically sources the ROS 2 Humble environment and sets the working directory to `/workspace/autoware_off-road_sim`. Use the terminal for RViz, ros2 commands, etc.
+
+---
+
+## Keyboard Control
+
+**Click inside the Isaac Sim viewport** to give it keyboard focus after launch.
+
+| Key | Action |
+|---|---|
+| `W` / `↑` | Accelerate forward |
+| `S` / `↓` | Accelerate backward |
+| `A` / `←` | Steer left |
+| `D` / `→` | Steer right |
+| `Space` | Emergency stop (reset speed and steer to 0) |
+| `~` | Switch camera view to Perspective |
+| `1` | Switch camera view and **KEYBOARD_CONTROL** to Ego Vehicle |
+| `2` | Switch camera view and **KEYBOARD_CONTROL** to Opponent Vehicle |
+| Hold `1` (≥1 s) | Toggle Ego Vehicle between **KEYBOARD_CONTROL** and **ROS2_CONTROL** mode |
+| Hold `2` (≥1 s) | Toggle Opponent Vehicle between **KEYBOARD_CONTROL** and **ROS2_CONTROL** mode |
+| `Backspace` | Restart simulation |
+| `/` | Toggle viewport HUD on/off |
+| `R` | Toggle segmentation dataset recording on/off |
+
+Each vehicle has an independent control mode toggled by holding `1` / `2` for ≥1 seconds:
+- **KEYBOARD_CONTROL** — keyboard drives the vehicle (WASD / arrow keys). ROS 2 commands on the drive/control topics are ignored.
+- **ROS2_CONTROL** — the vehicle is driven exclusively by incoming `autoware_control_msgs/Control` or `AckermannDriveStamped` messages. Keyboard input is ignored. If no fresh ROS 2 command is received, the vehicle holds at speed 0.
+
+The active mode for each vehicle is shown in the viewport overlay and in the terminal status line.
+
+---
+
+### Sensor Topic Remapping
+
+```yaml
+# Topics baked into the USD that are rewritten with each vehicle's topic_prefix.
+topics_to_remap:
+  - "/drive"
+  - "/imu"
+  - "/odom"
+  - "/point_cloud"
+  - "/rgb"
+
+# TF frame IDs baked into the USD that are rewritten to <prefix>/<frame>.
+frame_ids_to_remap:
+  - "odom"
+  - "base_link"
+```
+
+Topics in `topics_to_remap` are rewritten at launch time by prepending each vehicle's `topic_prefix` (e.g. `/imu` → `/ego/imu`). Frame IDs in `frame_ids_to_remap` are rewritten to `<prefix>/<frame>` (e.g. `odom` → `ego/odom`). The USD file does not need to be modified.
+
+
+
+---
+
+## ROS 2 Topics
+
+### Drive Command (input)
+
+Each vehicle exposes two separate command topics — one per message type. The vehicle must be in **ROS2_CONTROL mode** (hold `1` or `2` for ≥1 s) to act on either topic.
+
+| Vehicle | Topic | Message Type | Stack |
+|---|---|---|---|
+| Ego | `/ego/control` | `autoware_control_msgs/Control` | Autoware |
+| Ego | `/ego/drive` | `ackermann_msgs/AckermannDriveStamped` | RoboRacer / F1TENTH |
+| Opponent | `/opponent/control` | `autoware_control_msgs/Control` | Autoware |
+| Opponent | `/opponent/drive` | `ackermann_msgs/AckermannDriveStamped` | RoboRacer / F1TENTH |
+
+> **How `/ego/control` works:** `isaacsim_drive_bridge` (running as a Python 3.10 subprocess) subscribes to `/ego/control`, extracts `longitudinal.velocity` and `lateral.steering_tire_angle`, and republishes them as `AckermannDriveStamped` on `/ego/drive` so the built-in OmniGraph subscriber receives the command.
+
+### Sensor Outputs (after remapping)
+
+| Sensor | Ego Topic | Opponent Topic | Message Type |
+|---|---|---|---|
+| IMU | `/ego/imu` | `/opponent/imu` | `sensor_msgs/Imu` |
+| Odometry | `/ego/odom` | `/opponent/odom` | `nav_msgs/Odometry` |
+| LiDAR | `/ego/point_cloud` | `/opponent/point_cloud` | `sensor_msgs/PointCloud2` |
+| Camera | `/ego/rgb` | `/opponent/rgb` | `sensor_msgs/Image` |
+| GNSS | `/ego/gnss` | `/opponent/gnss` | `sensor_msgs/NavSatFix` |
+| TF | `/tf` | `/tf` | `tf2_msgs/TFMessage` |
+
+---
+
+## Control Interface
+
+The simulator accepts drive commands from both **Autoware** and **RoboRacer / F1TENTH** stacks. Each stack publishes to its own dedicated topic — no configuration change is needed.
+
+### How it works
+
+At startup, `launch_sim.py` spawns a Python 3.10 subprocess (`isaacsim_drive_bridge`, visible in `ros2 node list`) that registers **two subscriptions per vehicle**:
+
+- **`/ego/drive`** — `AckermannDriveStamped`: forwarded directly to the vehicle's built-in OmniGraph Ackermann controller.
+- **`/ego/control`** — `autoware_control_msgs/Control`: bridge extracts `longitudinal.velocity` + `lateral.steering_tire_angle` and republishes them as `AckermannDriveStamped` on `/ego/drive`, so the OmniGraph controller receives the command.
+
+**Control mode** is set per-vehicle by holding `1` (Ego) / `2` (Opponent) for ≥1 seconds:
+- **KEYBOARD_CONTROL mode** — keyboard input is applied; ROS 2 commands are ignored
+- **ROS2_CONTROL mode** — ROS 2 commands are applied; keyboard input is ignored
+
+The active control source is shown in the terminal status line:
+```
+[ACKERMANN]        ACTIVE: Ego_Vehicle | Spd=+3.20 m/s, Str=-8.6°
+[AUTOWARE]         ACTIVE: Ego_Vehicle | Spd=+5.00 m/s, Str=+4.6°
+[KEYBOARD_CONTROL] ACTIVE: Ego_Vehicle | Spd=+0.00 m/s, Str=+0.0°
+```
+
+### Step 1 — Switch vehicle to ROS2_CONTROL mode
+
+Click inside the Isaac Sim viewport, then hold `1` (Ego) or `2` (Opponent) for ≥1 second until the terminal status line shows `[ROS2_CONTROL]`.
+
+### Step 2 — Publishing an Autoware or RoboRacer control command
+
+```bash
+ros2 topic pub /ego/control autoware_control_msgs/msg/Control \
+  '{longitudinal: {velocity: 3.0, acceleration: 1.0}, lateral: {steering_tire_angle: 0.1}}'
+```
+
+or
+
+```bash
+ros2 topic pub /ego/drive ackermann_msgs/msg/AckermannDriveStamped \
+  '{drive: {speed: 3.0, steering_angle: 0.1}}'
+```
+
+
+---
+
+## Multi-Vehicle Setup
+
+Both vehicles can use the **same USD asset** (`roboracer_max.usd`). The launch script handles all topic isolation automatically via `topic_prefix`.
+
+```yaml
+vehicles:
+  - name: "Ego_Vehicle"
+    enabled: true
+    asset: "assets/vehicles/roboracer_max.usd"
+    ackermann_topic: "/ego/drive"
+    topic_prefix: "/ego"
+    spawn_position: [0.0, 0.0, 0.0]
+    spawn_orientation: [0.0, 0.0, 0.0]
+    enable_camera: true
+    enable_lidar: true
+    enable_gnss: true
+
+  - name: "Opponent_Vehicle"
+    enabled: true                          # ← set to true to activate
+    asset: "assets/vehicles/roboracer_max.usd"
+    ackermann_topic: "/opponent/drive"
+    topic_prefix: "/opponent"
+    spawn_position: [10.0, 0.0, 0.0]      # Spawn 10m ahead of Ego
+    spawn_orientation: [0.0, 0.0, 0.0]
+    enable_camera: true
+    enable_lidar: true
+    enable_gnss: true
+```
+
+### Hardware-in-the-Loop (HIL) Testing
+
+This setup connects a remote **PC** or **Jetson** running the **Autoware** or **RoboRacer** autonomy stack to the Isaac Sim environment running on the **simulation PC** over a LAN. The remote PC or Jetson receives simulated sensor data and publishes drive commands back to the simulator, identical to how it would behave on a physical car.
+
+#### Network Topology
+
+```
+┌──────────────────────────────────┐         ┌──────────────────────────────────┐
+│           PC (Simulation)        │         │   PC or Jetson (Autonomy Stack)  │
+│                                  │         │                                  │
+│  Isaac Sim                       │◄────────│  Autoware / RoboRacer stack      │
+│  ├─ publishes /ego/imu           │  LAN    │  ├─ subscribes /ego/imu          │
+│  ├─ publishes /ego/odom          │         │  ├─ subscribes /ego/odom         │
+│  ├─ publishes /ego/point_cloud   │         │  ├─ subscribes /ego/point_cloud  │
+│  ├─ publishes /ego/gnss          │         │  ├─ subscribes /ego/gnss         │
+│  ├─ subscribes /ego/control      │────────►│  └─ publishes /ego/control       │
+│  └─ subscribes /ego/drive        │         │     (autoware_control_msgs)      │
+│                                  │         │  OR publishes /ego/drive         │
+│  FastDDS Discovery Server        │         │     (AckermannDriveStamped)      │
+│  127.0.0.1:11811 → 0.0.0.0:11811 │         │  (points to PC discovery server) │
+└──────────────────────────────────┘         └──────────────────────────────────┘
+```
+
+#### Step 1 — Start the FastDDS Discovery Server on the simulation PC
+
+```bash
+# On the simulation PC — run inside or outside the Docker container
+fastdds discovery -i 0 -l 0.0.0.0 -p 11811
+```
+
+#### Step 2 — Configure Isaac Sim to Bind on All Interfaces
+
+Update the config:
+
+```yaml
+network_setup:
+  ros2_domain_id: 0
+  use_discovery_server: true
+  discovery_server_address: "0.0.0.0:11811"   # ← bind on all interfaces
+  force_tcp_transport: true
+```
+
+Then launch the simulator as usual.
+
+#### Step 3 — Configure the remote PC or Jetson to Use the simulation PC's Discovery Server
+
+```bash
+# Replace 192.168.1.100 with the actual IP of the simulation PC
+export ROS_DOMAIN_ID=0
+export RMW_FASTRTPS_USE_QOS_FROM_XML=1
+
+cat > /tmp/fastdds_hil.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>tcp_transport</transport_id>
+      <type>TCPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="default_profile" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>tcp_transport</transport_id>
+      </userTransports>
+      <builtin>
+        <discovery_config>
+          <discoveryProtocol>CLIENT</discoveryProtocol>
+          <discoveryServersList>
+            <RemoteServer prefix="44.53.00.5f.45.50.52.4f.53.49.4d.41">
+              <metatrafficUnicastLocatorList>
+                <locator>
+                  <TCPv4>
+                    <address>192.168.1.100</address>  <!-- PC IP -->
+                    <physical_port>11811</physical_port>
+                    <port>11811</port>
+                  </TCPv4>
+                </locator>
+              </metatrafficUnicastLocatorList>
+            </RemoteServer>
+          </discoveryServersList>
+        </discovery_config>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+
+export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastdds_hil.xml
+```
+
+#### Step 4 — Launch the Autoware or RoboRacer Stack on the remote PC or Jetson
+
+```bash
+# Example — adapt to your actual launch file
+ros2 launch roboracer_bringup sim_hil.launch.py
+```
+
+#### Step 5 — Verify Connectivity
+
+From the remote PC or Jetson:
+
+```bash
+ros2 topic list               # Should show /ego/imu, /ego/odom, etc.
+ros2 topic hz /ego/point_cloud  # Verify LiDAR data is flowing from PC
+ros2 topic echo /ego/drive    # Verify your stack is publishing commands
+```
+
+From the simulation PC:
+
+```bash
+ros2 topic echo /ego/drive    # Should show the commands sent by the Jetson
+```
+
+> **Firewall note:** Ensure TCP port `11811` is open on the PC: `sudo ufw allow 11811/tcp`
+
+---
+
+## Semantic Segmentation Dataset Recording
+
+The simulator can generate a paired RGB + semantic segmentation dataset while driving, useful for training perception models.
+
+### Semantic Segmentation Image Settings
+
+```yaml
+semantic_segmentation:
+  id_keywords:
+    0: ["default"]   # Catch-all label (non-drivable)
+    1: ["track"]     # Drivable surface — matched by prim name keyword
+  color_map:
+    0: [61, 93, 255]   # non-drivable → blue
+    1: [0, 255, 220]   # drivable → cyan
+  capture_frequency: 8  # every (120Hz / 8Hz) = 15 frames
+  image_resolution: [1280, 720]
+  images_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/images"
+  gt_masks_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/gt_masks"
+  overwrite_existing: false
+```
+
+### How it works
+
+- Press **`R`** in the viewport to **start** recording. Press **`R`** again to **stop**.
+- On start, the frame counter resets to 0 and images are saved from that point.
+- Each capture saves two files with the same zero-padded filename:
+  - `images/000000.png` — RGB image from the ego vehicle's colour camera
+  - `gt_masks/000000.png` — Colour-coded semantic segmentation mask
+- Capture rate, output paths, label classes, and colours are all set in the config under `semantic_segmentation`.
+
+### Semantic labelling
+
+Environment Mesh prims are labelled by matching their prim name against the `id_keywords` list. The `"default"` keyword acts as the catch-all for any prim that does not match a more specific keyword. Vehicle prims are never labelled (they are excluded from traversal).
+
+### Output structure
+
+```
+data/
+└── segmentation/
+    └── pumptrack_simple/
+        └── pumptrack_simple/
+            ├── images/
+            │   ├── 000000.png
+            │   ├── 000001.png
+            │   └── ...
+            └── gt_masks/
+                ├── 000000.png
+                ├── 000001.png
+                └── ...
+```
+
+> **Note:** The `data/` directory is git-ignored. Images are saved with world-readable permissions (`0o666`) so they are accessible from the host when running inside Docker as root.
+
+### Example of Semantic Segmentation Image
+
+- non-drivable → blue
+- drivable → cyan
+
+![Semantic Segmentation Image](media/segmentation_image.png)
+
+---
+
+## Viewport & Rendering Tips
+
+- **DLSS**: Enable `enable_DLSS_FPS_Multiplier_x2: true` in `viewport_settings` to use DLSS 2× upscaling for significantly higher FPS with minimal visual quality loss.
+- **Resolution**: Lowering `render_resolution` improves performance on slower GPUs.
+- **First launch**: Shader compilation runs automatically — expect a few minutes of delay before the viewport appears.
+
+---
+
+## Utility Scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/launch_sim.py` | Main simulation launcher (load USD, spawn vehicles, start keyboard control, record segmentation) |
+| `scripts/gnss_bridge.py` | Python 3.10 subprocess that publishes `sensor_msgs/NavSatFix` via rclpy (spawned automatically) |
+| `scripts/configs/pumptrack_simple_config.yaml` | Config for the pumptrack_simple environment |
+
+---
+
+## Troubleshooting
+
+### Vehicle does not move
+1. Click inside the Isaac Sim viewport to give it keyboard focus.
+2. Check the terminal for `[Teleop] SUCCESS: Control path initialized for Ego_Vehicle`.
+3. If missing, the ActionGraph path may have changed — inspect the stage's OmniGraph nodes and update the search string in `launch_sim.py`.
+
+### External ROS 2 drive command has no effect
+
+1. **Switch to ROS2_CONTROL mode first.** Hold `1` (Ego) or `2` (Opponent) for ≥1 second inside the viewport. The terminal status line must show `[ROS2_CONTROL]`, not `[KEYBOARD_CONTROL]`.
+2. **Confirm the bridge is running.** After launch, `ros2 node list` must include `/isaacsim_drive_bridge`. If it is missing, check `scripts/drive_bridge.log` for errors.
+3. **Check startup logs.** The terminal should print lines like:
+   ```
+   [drive_bridge] Ego_Vehicle: subscribed '/ego/drive' [AckermannDriveStamped]
+   [drive_bridge] Ego_Vehicle: subscribed '/ego/control' [autoware_control_msgs/Control] → republish on '/ego/drive'
+   ```
+   If `autoware_control_msgs/Control` is missing, the package is not installed — verify `ros-humble-autoware-control-msgs` was installed during the Docker build.
+4. **Use the correct topic.** Autoware stacks should publish to `/ego/control` (`autoware_control_msgs/Control`). RoboRacer/F1TENTH stacks publish to `/ego/drive` (`AckermannDriveStamped`).
+5. **Check the status line.** Once a live command is received it switches from `[ROS2_CONTROL]` to `[ACKERMANN]` or `[AUTOWARE]`.
+
+### Segmentation images not saving
+- Check the terminal for `[Segmentation] Setup complete` after launch. If it shows `seg_enabled=False`, check for setup errors above it.
+- Confirm `R` is pressed with the viewport focused.
+- Verify the `images_dir` and `gt_masks_dir` paths exist under `data/` — they are created automatically on launch.
+- Images saved inside Docker (running as root) will have `0o666` permissions and should be readable from the host.
+
+### ROS 2 topics not visible
+- Confirm `ros2_domain_id` matches between Isaac Sim and your terminal (default: `0`).
+- If using FastDDS discovery server, ensure it is running: `fastdds discovery -i 0 -l 127.0.0.1 -p 11811`.
+- Check transport: `export FASTRTPS_DEFAULT_PROFILES_FILE=/workspace/autoware_off-road_sim/scripts/configs/fastdds_tcp.xml`.
+
+### GNSS topics not appearing
+
+- Confirm `gnss.enabled: true` is set at the top level of the config and `enable_gnss: true` is set on the vehicle.
+- Check the terminal for `[GNSS] <vehicle>: NavSatFix publisher on '/ego/gnss'` at launch. If it shows `[GNSS] Setup error:`, check `scripts/gnss_bridge.log` for the full error from the Python 3.10 bridge process.
+- The bridge requires `/usr/bin/python3.10` and the ROS Humble packages at `/opt/ros/humble`. Both are present in the Docker image.
+- Verify the topic is live: `ros2 topic hz /ego/gnss` (expected ~10 Hz).
+
+### `python.sh: No such file or directory`
+The Isaac Sim build output is at:
+```
+/root/isaacsim/_build/linux-x86_64/release/python.sh
+```
+If missing, the build may not have completed. Re-run `./docker/build.sh`.
+
+---
+
+## License
+
+See [LICENSE](./LICENSE).

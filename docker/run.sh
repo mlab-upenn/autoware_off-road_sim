@@ -28,6 +28,7 @@ echo "Running Docker container..."
 docker run --rm -it \
     --gpus all \
     --network host \
+    --workdir /workspace/autoware_off-road_sim \
     -e "DISPLAY=${DISPLAY}" \
     -e "XAUTHORITY=${XAUTH}" \
     -e "NVIDIA_DRIVER_CAPABILITIES=all" \
@@ -35,7 +36,7 @@ docker run --rm -it \
     -v $XAUTH:$XAUTH \
     -v $(pwd)/docker/entrypoint.sh:/usr/local/bin/entrypoint.sh \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
-    -v $(pwd):/workspace/roboracer_isaacsim \
-    --name roboracer_isaacsim \
-    roboracer_isaacsim:5.1 \
+    -v $(pwd):/workspace/autoware_off-road_sim \
+    --name autoware_off-road_sim \
+    autoware_off-road_sim:6.0 \
     "$@"

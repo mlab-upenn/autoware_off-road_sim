@@ -58,6 +58,8 @@ RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o 
 RUN apt-get update && apt-get install -y \
     ros-humble-desktop \
     ros-humble-rmw-cyclonedds-cpp \
+    ros-humble-ackermann-msgs \
+    ros-humble-autoware-control-msgs \
     python3-colcon-common-extensions \
     && rm -rf /var/lib/apt/lists/*
 
@@ -85,7 +87,7 @@ WORKDIR /root/isaacsim
 RUN echo "yes" | ./build.sh
 
 # Copy project files
-COPY . /workspace/roboracer_isaacsim
+COPY . /workspace/autoware_off-road_sim
 
 # Setup Entrypoint
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
