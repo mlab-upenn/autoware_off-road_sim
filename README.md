@@ -401,11 +401,11 @@ semantic_segmentation:
 ### How it works
 
 - Press **`R`** in the viewport to **start** recording. Press **`R`** again to **stop**.
-- On start, the frame counter resets to 0 and images are saved from that point.
 - Each capture saves two files with the same zero-padded filename:
   - `images/000000.png` — RGB image from the ego vehicle's colour camera
   - `gt_masks/000000.png` — Colour-coded semantic segmentation mask
 - Capture rate, output paths, label classes, and colours are all set in the config under `semantic_segmentation`.
+- Enable `overwrite_existing` to reset the frame counter to 0 and save images from the start.
 
 ### Semantic labelling
 
