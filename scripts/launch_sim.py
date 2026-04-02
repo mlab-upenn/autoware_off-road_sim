@@ -12,12 +12,19 @@ except ImportError:
 def main():
     parser = argparse.ArgumentParser(description="Launch IsaacSim with specified assets")
     parser.add_argument(
-        "--config", 
-        type=str, 
-        default=os.path.join(os.path.dirname(__file__), "configs", "simulation_config.yaml"), 
+        "--config",
+        type=str,
+        default=os.path.join(os.path.dirname(__file__), "configs", "simulation_config.yaml"),
         help="Path to configuration file"
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run without a display window. All vehicles default to ROS2_CONTROL mode.",
+    )
     args = parser.parse_args()
+    headless_mode = args.headless
 
     config_path = os.path.abspath(args.config)
     print(f"Loading configuration from: {config_path}")
@@ -96,40 +103,38 @@ def main():
         else:
             print(f"[SimApp] Warning: isaacsim.exp.full.kit not found in {_apps_dir}, falling back to default")
             _exp_full = ""
-    simulation_app = SimulationApp({
-        "headless": False,
-        "experience": _exp_full,
-        "width": render_res[0],
-        "height": render_res[1],
-        "display_options": 3287  # 3286 (default) | 1 (DISP_FPS)
-    })
+    _sim_cfg = {"headless": headless_mode, "experience": _exp_full}
+    if not headless_mode:
+        _sim_cfg["width"]           = render_res[0]
+        _sim_cfg["height"]          = render_res[1]
+        _sim_cfg["display_options"] = 3287  # 3286 (default) | 1 (DISP_FPS)
+    simulation_app = SimulationApp(_sim_cfg)
     
     # Force output renderer resolution specifically (useful if decoupled from window size)
     import carb
     carb_settings = carb.settings.get_settings()
-    carb_settings.set_int("/app/renderer/resolution/width", render_res[0])
-    carb_settings.set_int("/app/renderer/resolution/height", render_res[1])
-    
-    # Toggle viewport FPS display
-    carb_settings.set_bool("/app/window/showFps", True)
-    carb_settings.set_bool("/app/viewport/showFps", True)
-    carb_settings.set_bool("/exts/omni.kit.viewport.window/fps", True)
 
-    # DLSS Super Resolution + Frame Generation (FPS Multiplier x2)
-    # /rtx/post/aa/op: 0=None,1=TAA,2=FXAA,3=DLSS,4=DLAA
-    # /rtx/post/dlss/execMode: 0=Performance(~2x), 1=Balanced, 2=Quality, 3=UltraPerf
-    # /rtx-transient/dlssg/enabled: DLSS-G frame generation = FPS Multiplier in the UI
-    if viewport_opts.get("enable_DLSS_FPS_Multiplier_x2", False):
-        carb_settings.set_int("/rtx/post/aa/op", 3)
-        carb_settings.set_int("/rtx/post/dlss/execMode", 0)
-        carb_settings.set_bool("/rtx-transient/dlssg/enabled", True)
-        print("[Renderer] DLSS Performance + FPS Multiplier x2 (DLSS-G) enabled.")
+    if not headless_mode:
+        carb_settings.set_int("/app/renderer/resolution/width", render_res[0])
+        carb_settings.set_int("/app/renderer/resolution/height", render_res[1])
+        # Toggle viewport FPS display
+        carb_settings.set_bool("/app/window/showFps", True)
+        carb_settings.set_bool("/app/viewport/showFps", True)
+        carb_settings.set_bool("/exts/omni.kit.viewport.window/fps", True)
+        # DLSS Super Resolution + Frame Generation (FPS Multiplier x2)
+        # /rtx/post/aa/op: 0=None,1=TAA,2=FXAA,3=DLSS,4=DLAA
+        # /rtx/post/dlss/execMode: 0=Performance(~2x), 1=Balanced, 2=Quality, 3=UltraPerf
+        # /rtx-transient/dlssg/enabled: DLSS-G frame generation = FPS Multiplier in the UI
+        if viewport_opts.get("enable_DLSS_FPS_Multiplier_x2", False):
+            carb_settings.set_int("/rtx/post/aa/op", 3)
+            carb_settings.set_int("/rtx/post/dlss/execMode", 0)
+            carb_settings.set_bool("/rtx-transient/dlssg/enabled", True)
+            print("[Renderer] DLSS Performance + FPS Multiplier x2 (DLSS-G) enabled.")
+        print(f"Configured Viewport Render Resolution to {render_res[0]}x{render_res[1]} with FPS counter")
 
     # Prevent Isaac Sim Full from auto-adding a defaultLight to the stage.
     # The environment USD already contains a DomeLight; a second light would alter the scene.
     carb_settings.set_bool("/app/stage/generateDefaultLight", False)
-
-    print(f"Configured Viewport Render Resolution to {render_res[0]}x{render_res[1]} with FPS counter")
 
     import omni.usd
     from pxr import UsdGeom, Gf
@@ -1306,9 +1311,13 @@ def main():
     follow_cam_handles = {} # Internal tracking for the simulation loop
 
     # ── Viewport HUD Overlay ──────────────────────────────────────────────────
+    HUD_ENABLED = False
+    hud_labels  = {}
     try:
+        if headless_mode:
+            raise RuntimeError("headless – skipping HUD")
         import omni.ui as ui
-        
+
         HUD_ENABLED = True
         
         # ── Color constants (omni.ui = 0xAABBGGRR) ───────────────────────────
@@ -1521,7 +1530,9 @@ def main():
     CTRL_HOLD_DURATION = 1.0  # seconds hold required to toggle control mode
 
     # Per-vehicle explicit control mode: "KEYBOARD_CONTROL" or "ROS2_CONTROL". Toggled by holding 1/2.
-    veh_ctrl_mode = {veh["name"]: "KEYBOARD_CONTROL" for veh in vehicles if veh.get("enabled", True)}
+    # In headless mode all vehicles default to ROS2_CONTROL (no keyboard available).
+    _default_ctrl = "ROS2_CONTROL" if headless_mode else "KEYBOARD_CONTROL"
+    veh_ctrl_mode = {veh["name"]: _default_ctrl for veh in vehicles if veh.get("enabled", True)}
     # Track the last mode each vehicle's OmniGraph publisher was routed for,
     # so we only call og.Controller.set() on the topicName when it actually changes.
     _pub_routed_mode = {}  # veh_name -> "KEYBOARD_CONTROL" or "ROS2_CONTROL"
@@ -1710,7 +1721,18 @@ def main():
     iteration = 0
     _restart_pending = False  # True for one frame while stop→play transition settles
 
+    if headless_mode:
+        _veh_names = list(veh_ctrl_mode.keys())
+        print(f"\n[Headless] Running without display. Control mode: ROS2_CONTROL for {_veh_names}")
+        print(f"[Headless] Subscribe to drive commands via /ego/drive (AckermannDriveStamped) or /ego/control (autoware_control_msgs/Control)")
     print(f"\n[Simulator] Entering Main Loop ({app_freq}Hz)...")
+
+    # Pre-import hot-path modules once so per-tick lookups hit the cache cheaply.
+    from omni.usd import get_world_transform_matrix as _get_wtm
+    from pxr import Gf, UsdGeom
+    _FC_UP = Gf.Vec3d(0, 0, 1)          # constant up-vector for follow-camera math
+    def _avg(b): return sum(b) / len(b)  # smoothing helper for follow-camera buffers
+    _gnss_base_prims = {}  # veh_name -> cached Usd.Prim (avoids GetPrimAtPath every tick)
     while simulation_app.is_running():
         simulation_app.update()
         iteration += 1
@@ -2044,8 +2066,9 @@ def main():
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_steer"]), 0.0)
             except Exception: pass
             
-        # Follow Cameras
-        for veh_name, cfg in veh_follow_configs.items():
+        # Follow Cameras (skipped in headless mode — no viewport)
+        if not headless_mode:
+         for veh_name, cfg in veh_follow_configs.items():
             data = follow_cam_handles.get(veh_name)
             if not data or not data["cam"].GetPrim().IsValid():
                 from pxr import UsdGeom
@@ -2080,9 +2103,7 @@ def main():
                 follow_cam_handles[veh_name] = data
 
             try:
-                from omni.usd import get_world_transform_matrix
-                from pxr import Gf, UsdGeom
-                m = get_world_transform_matrix(data["base"])
+                m = _get_wtm(data["base"])
                 pos = m.ExtractTranslation()
                 rot = m.ExtractRotationMatrix()
                 # Derive forward from the chassis rotation matrix only.
@@ -2090,7 +2111,6 @@ def main():
                 # front wheel steered: the front prim is parented to steering geometry
                 # so its world position shifts even when the vehicle body is stationary.
                 raw_fwd = rot.GetRow(0)
-                up = Gf.Vec3d(0, 0, 1)
                 # Smooth position
                 data["buf_x"].append(pos[0]); data["buf_y"].append(pos[1])
                 data["buf_z"].append(pos[2] + data["height"])
@@ -2099,7 +2119,6 @@ def main():
                 data["buf_fx"].append(raw_fwd[0])
                 data["buf_fy"].append(raw_fwd[1])
                 data["buf_fz"].append(raw_fwd[2])
-                def _avg(b): return sum(b) / len(b)
                 sx = _avg(data["buf_x"]); sy = _avg(data["buf_y"])
                 sz = _avg(data["buf_z"]); slz = _avg(data["buf_lz"])
                 sfwd = Gf.Vec3d(_avg(data["buf_fx"]), _avg(data["buf_fy"]), _avg(data["buf_fz"]))
@@ -2109,14 +2128,18 @@ def main():
                 xy_base = Gf.Vec3d(sx, sy, pos[2]) - (sfwd * data["dist"])
                 cam_pos_world = Gf.Vec3d(xy_base[0], xy_base[1], sz)
                 lookat_pos = Gf.Vec3d(sx, sy, slz)
-                lookat_m_world = Gf.Matrix4d().SetLookAt(cam_pos_world, lookat_pos, up)
+                lookat_m_world = Gf.Matrix4d().SetLookAt(cam_pos_world, lookat_pos, _FC_UP)
                 # Camera is at world level so its local transform IS its world transform —
                 # no parent inverse needed (and no chassis physics jitter contamination).
                 local_m = lookat_m_world.GetInverse()
                 xformable = UsdGeom.Xformable(data["cam"])
-                x_attr = xformable.GetPrim().GetAttribute("xformOp:transform")
-                if not x_attr: xformable.AddTransformOp().Set(local_m)
-                else: x_attr.Set(local_m)
+                x_attr = data.get("x_attr") or xformable.GetPrim().GetAttribute("xformOp:transform")
+                if not x_attr:
+                    xformable.AddTransformOp().Set(local_m)
+                    data["x_attr"] = xformable.GetPrim().GetAttribute("xformOp:transform")
+                else:
+                    x_attr.Set(local_m)
+                    data["x_attr"] = x_attr
             except Exception: pass
 
         # ── GNSS Publish ──────────────────────────────────────────────────────
@@ -2131,11 +2154,12 @@ def main():
                     _gcfg = veh_follow_configs.get(_gvn)
                     if not _gcfg:
                         continue
-                    from omni.usd import get_world_transform_matrix as _gwt
-                    _gbase = stage.GetPrimAtPath(_gcfg["base_path"])
+                    if _gvn not in _gnss_base_prims:
+                        _gnss_base_prims[_gvn] = stage.GetPrimAtPath(_gcfg["base_path"])
+                    _gbase = _gnss_base_prims[_gvn]
                     if not _gbase.IsValid():
                         continue
-                    _gp = _gwt(_gbase).ExtractTranslation()
+                    _gp = _get_wtm(_gbase).ExtractTranslation()
                     _gx, _gy, _gz = float(_gp[0]), float(_gp[1]), float(_gp[2])
 
                     # Equirectangular: sim +X = East (lon), sim +Y = North (lat)

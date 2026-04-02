@@ -13,14 +13,15 @@ The simulator features a **1/5th-scale RoboRacer-Max** model equipped with a com
 1. [Prerequisites](#prerequisites)
 2. [Docker Setup](#docker-setup)
 3. [Running the Simulation](#running-the-simulation)
-4. [Keyboard Control](#keyboard-control)
-5. [ROS 2 Topics](#ros-2-topics)
-6. [Control Interface](#control-interface)
-7. [Multi-Vehicle Setup](#multi-vehicle-setup)
-8. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
-9. [Viewport & Rendering Tips](#viewport--rendering-tips)
-10. [Utility Scripts](#utility-scripts)
-11. [Troubleshooting](#troubleshooting)
+4. [Headless Mode](#headless-mode)
+5. [Keyboard Control](#keyboard-control)
+6. [ROS 2 Topics](#ros-2-topics)
+7. [Control Interface](#control-interface)
+8. [Multi-Vehicle Setup](#multi-vehicle-setup)
+9. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
+10. [Viewport & Rendering Tips](#viewport--rendering-tips)
+11. [Utility Scripts](#utility-scripts)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -94,6 +95,43 @@ The launch script will:
 3. Remap all sensor topics per vehicle (no conflicts in multi-vehicle mode)
 4. Start the ROS 2 bridge
 5. Inject keyboard control via the ActionGraph
+
+---
+
+## Headless Mode
+
+Add `--headless` to run the simulator without a display window. This is useful for **Hardware-in-the-Loop testing**, **CI pipelines**, and **remote/server deployments** where no monitor is attached.
+
+```bash
+/root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py \
+  --config scripts/configs/pumptrack_simple_config.yaml --headless
+```
+
+**Differences from normal mode:**
+
+| Feature | Normal | Headless |
+|---|---|---|
+| Display window | Yes | No |
+| Viewport HUD | Yes | Skipped |
+| Follow cameras | Yes | Skipped |
+| Default control mode | `KEYBOARD_CONTROL` | `ROS2_CONTROL` (all vehicles) |
+| Keyboard control | Available (hold `1`/`2` to toggle) | Not available |
+
+In headless mode all vehicles start directly in **ROS2_CONTROL** — no need to hold `1` or `2` to enable ROS 2 commands. At startup the terminal prints:
+
+```
+[Headless] Running without display. Control mode: ROS2_CONTROL for ['Ego_Vehicle']
+[Headless] Subscribe to drive commands via /ego/drive (AckermannDriveStamped) or /ego/control (autoware_control_msgs/Control)
+```
+
+Publish commands to the vehicle immediately after launch:
+
+```bash
+ros2 topic pub --rate 15 /ego/control autoware_control_msgs/msg/Control \
+  '{longitudinal: {velocity: 2.0, acceleration: 1.0}, lateral: {steering_tire_angle: 0.5}}'
+```
+
+All sensors (`/ego/imu`, `/ego/odom`, `/ego/point_cloud`, `/ego/gnss`, etc.) continue to publish normally.
 
 ---
 
