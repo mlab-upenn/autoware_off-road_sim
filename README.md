@@ -258,7 +258,9 @@ vehicles:
 
 ### Hardware-in-the-Loop (HIL) Testing
 
-This setup connects a remote **PC** or **Jetson** running the **Autoware** or **RoboRacer** autonomy stack to the Isaac Sim environment running on the **simulation PC** over a LAN. The remote PC or Jetson receives simulated sensor data and publishes drive commands back to the simulator, identical to how it would behave on a physical car.
+This setup connects a remote **PC** or **Jetson** running the **Autoware** or **RoboRacer** autonomy stack to the Isaac Sim environment running on the **simulation PC** over a **LAN or WiFi** network. The remote PC or Jetson receives simulated sensor data and publishes drive commands back to the simulator, identical to how it would behave on a physical car.
+
+> **WiFi note:** WiFi is supported but introduces variable latency and occasional packet loss. Use a dedicated 5 GHz access point with no other clients, or prefer wired Ethernet for high-frequency sensor streams (LiDAR, camera). The simulator's 150 ms command timeout will trigger a safety stop if commands are delayed — consider raising it for unreliable networks.
 
 #### Network Topology
 
@@ -267,8 +269,8 @@ This setup connects a remote **PC** or **Jetson** running the **Autoware** or **
 │           PC (Simulation)        │         │   PC or Jetson (Autonomy Stack)  │
 │                                  │         │                                  │
 │  Isaac Sim                       │◄────────│  Autoware / RoboRacer stack      │
-│  ├─ publishes /ego/imu           │  LAN    │  ├─ subscribes /ego/imu          │
-│  ├─ publishes /ego/odom          │         │  ├─ subscribes /ego/odom         │
+│  ├─ publishes /ego/imu           │ LAN /   │  ├─ subscribes /ego/imu          │
+│  ├─ publishes /ego/odom          │  WiFi   │  ├─ subscribes /ego/odom         │
 │  ├─ publishes /ego/point_cloud   │         │  ├─ subscribes /ego/point_cloud  │
 │  ├─ publishes /ego/gnss          │         │  ├─ subscribes /ego/gnss         │
 │  ├─ subscribes /ego/control      │────────►│  └─ publishes /ego/control       │
@@ -283,6 +285,7 @@ This setup connects a remote **PC** or **Jetson** running the **Autoware** or **
 
 ```bash
 # On the simulation PC — run inside or outside the Docker container
+# Binds on all interfaces (LAN and WiFi adapters)
 fastdds discovery -i 0 -l 0.0.0.0 -p 11811
 ```
 
@@ -370,7 +373,9 @@ From the simulation PC:
 ros2 topic echo /ego/drive    # Should show the commands sent by the Jetson
 ```
 
-> **Firewall note:** Ensure TCP port `11811` is open on the PC: `sudo ufw allow 11811/tcp`
+> **Firewall note:** Ensure TCP port `11811` is open on the simulation PC: `sudo ufw allow 11811/tcp`
+>
+> **WiFi tip:** If using WiFi, pin FastDDS to the correct interface by setting `discovery_server_address` to the simulation PC's WiFi IP (e.g. `192.168.1.100:11811`) rather than `0.0.0.0`, and use the same IP in the remote client XML. This avoids discovery traffic being routed over the wrong adapter.
 
 ---
 
