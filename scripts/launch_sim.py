@@ -2,6 +2,7 @@ import os
 import argparse
 import collections
 import time
+import subprocess
 import yaml
 try:
     from isaacsim import SimulationApp
@@ -33,26 +34,45 @@ def main():
     # Parse network configuration
     network_setup = config.get("network_setup", {})
     ros2_domain_id = network_setup.get("ros2_domain_id", 0)
-    use_discovery_server = network_setup.get("use_discovery_server", False)
-    discovery_server_address = network_setup.get("discovery_server_address", "127.0.0.1:11811")
-    force_tcp_transport = network_setup.get("force_tcp_transport", False)
+    network_interface = network_setup.get("network_interface", "auto")
 
-    # Set ROS_DOMAIN_ID environment variable to ensure IsaacSim ROS2 bridge communicates on the right domain
+    # ── CycloneDDS setup ──────────────────────────────────────────────────
+    # Belt-and-suspenders: set RMW explicitly in case Isaac Sim's Python doesn't
+    # inherit the Docker ENV (it launches with its own bundled interpreter).
+    os.environ["RMW_IMPLEMENTATION"] = "rmw_cyclonedds_cpp"
     os.environ["ROS_DOMAIN_ID"] = str(ros2_domain_id)
-    print(f"Configured ROS_DOMAIN_ID: {ros2_domain_id}")
 
-    # Set Hardware in the Loop (TCP/IP) variables before importing SimulationApp
-    if use_discovery_server:
-        os.environ["ROS_DISCOVERY_SERVER"] = discovery_server_address
-        print(f"Configured ROS_DISCOVERY_SERVER: {discovery_server_address}")
-        
-    if force_tcp_transport:
-        fastdds_profile_path = os.path.join(os.path.dirname(__file__), "configs", "fastdds_tcp.xml")
-        if os.path.exists(fastdds_profile_path):
-            os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = os.path.abspath(fastdds_profile_path)
-            print(f"Configured FASTRTPS_DEFAULT_PROFILES_FILE using strict TCP profile: {fastdds_profile_path}")
-        else:
-            print(f"Warning: force_tcp_transport is enabled but profile was not found at {fastdds_profile_path}")
+    if network_interface != "auto":
+        # Resolve explicit IP or interface name → IP address
+        def _resolve_ip(iface):
+            if "." in iface:          # already an IP string
+                return iface
+            try:                      # interface name → IP via fcntl SIOCGIFADDR
+                import socket, fcntl, struct
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                packed = fcntl.ioctl(s.fileno(), 0x8915,
+                                     struct.pack("256s", iface[:15].encode()))
+                return socket.inet_ntoa(packed[20:24])
+            except Exception:
+                return iface          # fall back to the string as-is
+
+        lan_ip = _resolve_ip(network_interface)
+        _cyclone_xml = (
+            '<?xml version="1.0" encoding="UTF-8" ?>\n'
+            '<CycloneDDS><Domain><General>\n'
+            f'  <NetworkInterfaceAddress>{lan_ip}</NetworkInterfaceAddress>\n'
+            '</General></Domain></CycloneDDS>\n'
+        )
+        _cyclone_xml_path = "/tmp/cyclone_hil.xml"
+        with open(_cyclone_xml_path, "w") as _f:
+            _f.write(_cyclone_xml)
+        os.environ["CYCLONEDDS_URI"] = f"file://{_cyclone_xml_path}"
+        print(f"[ROS2] CycloneDDS pinned to interface: {lan_ip}")
+        print(f"[ROS2] CYCLONEDDS_URI = {os.environ['CYCLONEDDS_URI']}")
+    else:
+        print("[ROS2] CycloneDDS using automatic interface/multicast discovery")
+
+    print(f"[ROS2] RMW_IMPLEMENTATION=rmw_cyclonedds_cpp  ROS_DOMAIN_ID={ros2_domain_id}")
 
     # Initialize the simulation app
     viewport_opts = config.get("viewport_settings", {})
@@ -659,20 +679,19 @@ def main():
             _drv_os.path.dirname(_drv_os.path.abspath(__file__)),
             "drive_bridge.py")
         _drv_env = {
-            "HOME":              _drv_os.environ.get("HOME", "/root"),
-            "USER":              _drv_os.environ.get("USER", "root"),
-            "PATH":              "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "PYTHONPATH":        ("/opt/ros/humble/lib/python3.10/site-packages:"
-                                  "/opt/ros/humble/local/lib/python3.10/dist-packages"),
-            "AMENT_PREFIX_PATH": "/opt/ros/humble",
-            "LD_LIBRARY_PATH":   "/opt/ros/humble/lib",
-            "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
-            "ROS_DOMAIN_ID":     _drv_os.environ.get("ROS_DOMAIN_ID", "0"),
+            "HOME":               _drv_os.environ.get("HOME", "/root"),
+            "USER":               _drv_os.environ.get("USER", "root"),
+            "PATH":               "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PYTHONPATH":         ("/opt/ros/humble/lib/python3.10/site-packages:"
+                                   "/opt/ros/humble/local/lib/python3.10/dist-packages"),
+            "AMENT_PREFIX_PATH":  "/opt/ros/humble",
+            "LD_LIBRARY_PATH":    "/opt/ros/humble/lib",
+            "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
+            "ROS_DOMAIN_ID":      _drv_os.environ.get("ROS_DOMAIN_ID", "0"),
+            # Forward interface pinning if set (multi-NIC hosts)
+            **({"CYCLONEDDS_URI": _drv_os.environ["CYCLONEDDS_URI"]}
+               if "CYCLONEDDS_URI" in _drv_os.environ else {}),
         }
-        # Do NOT forward ROS_DISCOVERY_SERVER or FASTRTPS_DEFAULT_PROFILES_FILE.
-        # drive_bridge uses simple DDS discovery (same as gnss_bridge) so that
-        # Autoware and plain ros2 tools can find its subscriptions without needing
-        # the discovery server configured.
 
         _drv_log_path = _drv_os.path.join(
             _drv_os.path.dirname(_drv_os.path.abspath(__file__)),
@@ -1402,6 +1421,46 @@ def main():
                     hud_labels[veh_name] = models
 
         print("[HUD] Viewport overlay window created.")
+
+        # ── IP address card — flush below the vehicle HUD cards ──────────────
+        try:
+            import socket as _sock
+            try:
+                _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+                _s.connect(("8.8.8.8", 80))
+                _local_ip = _s.getsockname()[0]
+                _s.close()
+            except Exception:
+                _local_ip = "?"
+
+            _ip_bar_h = FONT_ROW + CARD_MARGIN * 2
+            ip_bar_window = ui.Window(
+                "IPStatusBar",
+                width=total_w,
+                height=_ip_bar_h,
+                position_x=70,
+                position_y=10 + total_h + 35,
+                flags=(
+                    ui.WINDOW_FLAGS_NO_TITLE_BAR
+                    | ui.WINDOW_FLAGS_NO_SCROLLBAR
+                    | ui.WINDOW_FLAGS_NO_RESIZE
+                    | ui.WINDOW_FLAGS_NO_MOVE
+                ),
+            )
+            ip_bar_window.frame.set_style({"background_color": 0x00000000})
+            with ip_bar_window.frame:
+                with ui.ZStack(width=CARD_W, height=_ip_bar_h):
+                    # Same semi-transparent background as the vehicle cards
+                    ui.Rectangle(style={"background_color": 0x55383838, "border_radius": 8})
+                    with ui.HStack(margin=CARD_MARGIN):
+                        ui.Label("IP ADDRESS:", style={"color": C_WHITE, "font_size": FONT_ROW},
+                                 width=LABEL_W + INDENT_W)
+                        ui.Label(_local_ip, style={"color": C_WHITE, "font_size": FONT_ROW},
+                                 width=ui.Fraction(1))
+            print(f"[HUD] IP address card: {_local_ip}")
+        except Exception as _ip_err:
+            print(f"[HUD] IP address card skipped: {_ip_err}")
+
     except Exception as e:
         HUD_ENABLED = False
         hud_labels = {}

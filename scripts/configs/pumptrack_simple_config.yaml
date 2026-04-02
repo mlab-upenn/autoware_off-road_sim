@@ -77,9 +77,8 @@ map_server:
 
 network_setup:
   ros2_domain_id: 0
-  use_discovery_server: true
-  discovery_server_address: "127.0.0.1:11811"
-  force_tcp_transport: true
+  network_interface: "auto"   # "auto" = CycloneDDS multicast on all interfaces;
+                               # set to "eth0" or "192.168.x.x" to pin a specific NIC
 
 semantic_segmentation:
   id_keywords:

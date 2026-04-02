@@ -256,9 +256,11 @@ vehicles:
 
 ### Hardware-in-the-Loop (HIL) Testing
 
-This setup connects a remote **PC** or **Jetson** running the **Autoware** or **RoboRacer** autonomy stack to the Isaac Sim environment running on the **simulation PC** over a **LAN or WiFi** network. The remote PC or Jetson receives simulated sensor data and publishes drive commands back to the simulator, identical to how it would behave on a physical car.
+This setup connects a remote **PC** or **Jetson** running the **Autoware** or **RoboRacer** autonomy stack to the Isaac Sim environment running on the **simulation PC** over a **LAN or WiFi** network.
 
-> **WiFi note:** WiFi is supported but introduces variable latency and occasional packet loss. Use a dedicated 5 GHz access point with no other clients, or prefer wired Ethernet for high-frequency sensor streams (LiDAR, camera). The simulator's 150 ms command timeout will trigger a safety stop if commands are delayed.
+> **WiFi note:** WiFi is supported but introduces variable latency. Use a dedicated 5 GHz access point, or prefer wired Ethernet for high-frequency sensor streams (LiDAR, camera).
+
+The stack uses **CycloneDDS** (`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`), matching Autoware's default middleware. CycloneDDS auto-discovers peers via multicast — no discovery server is needed.
 
 #### Network Topology
 
@@ -266,7 +268,7 @@ This setup connects a remote **PC** or **Jetson** running the **Autoware** or **
 ┌──────────────────────────────────┐         ┌──────────────────────────────────┐
 │           PC (Simulation)        │         │   PC or Jetson (Autonomy Stack)  │
 │                                  │         │                                  │
-│  Isaac Sim                       │◄────────│  Autoware / RoboRacer stack      │
+│  Isaac Sim  (CycloneDDS)         │◄────────│  Autoware / RoboRacer stack      │
 │  ├─ publishes /ego/imu           │ LAN /   │  ├─ subscribes /ego/imu          │
 │  ├─ publishes /ego/odom          │  WiFi   │  ├─ subscribes /ego/odom         │
 │  ├─ publishes /ego/point_cloud   │         │  ├─ subscribes /ego/point_cloud  │
@@ -274,88 +276,46 @@ This setup connects a remote **PC** or **Jetson** running the **Autoware** or **
 │  ├─ subscribes /ego/control      │────────►│  └─ publishes /ego/control       │
 │  └─ subscribes /ego/drive        │         │     (autoware_control_msgs)      │
 │                                  │         │  OR publishes /ego/drive         │
-│  FastDDS Discovery Server        │         │     (AckermannDriveStamped)      │
-│  127.0.0.1:11811 → 0.0.0.0:11811 │         │  (points to PC discovery server) │
-└──────────────────────────────────┘         └──────────────────────────────────┘
+│  Auto multicast discovery        │         │     (AckermannDriveStamped)      │
+│  (no server required)            │         │  RMW_IMPLEMENTATION=             │
+└──────────────────────────────────┘         │    rmw_cyclonedds_cpp            │
+                                             └──────────────────────────────────┘
 ```
 
-#### Step 1 — Start the FastDDS Discovery Server on the simulation PC
+#### Step 1 — Launch the simulator (no extra config needed)
 
-```bash
-# On the simulation PC — run inside or outside the Docker container
-# Binds on all interfaces (LAN and WiFi adapters)
-fastdds discovery -i 0 -l 0.0.0.0 -p 11811
-```
-
-#### Step 2 — Configure Isaac Sim to Bind on All Interfaces
-
-Update the config:
+The default `pumptrack_simple_config.yaml` already has the correct settings:
 
 ```yaml
 network_setup:
   ros2_domain_id: 0
-  use_discovery_server: true
-  discovery_server_address: "0.0.0.0:11811"   # ← bind on all interfaces
-  force_tcp_transport: true
+  network_interface: "auto"   # "auto" = CycloneDDS multicast; set to "eth0" or "192.168.x.x" to pin a NIC
 ```
 
-Then launch the simulator as usual.
+Launch as usual. CycloneDDS starts automatically and you will see:
 
-#### Step 3 — Configure the remote PC or Jetson to Use the simulation PC's Discovery Server
+```
+[ROS2] RMW_IMPLEMENTATION=rmw_cyclonedds_cpp  ROS_DOMAIN_ID=0
+[ROS2] CycloneDDS using automatic interface/multicast discovery
+```
+
+> **Multi-NIC hosts:** If the simulation PC has both Ethernet and WiFi, set `network_interface: "eth0"` (or the relevant interface name / IP) to ensure CycloneDDS binds to the correct adapter.
+
+> **In-sim IP display:** Once the simulator is running, the local LAN IP address of the simulation PC is shown at the bottom of the HUD overlay (`IP ADDRESS: xxx.xxx.xxx.xxx`). Use this address when configuring the remote Autoware / Jetson PC — no need to run `ifconfig` separately.
+
+#### Step 2 — Configure the remote PC or Jetson
+
+No XML profiles needed. Just set two environment variables before launching your autonomy stack:
 
 ```bash
-# Replace 192.168.1.100 with the actual IP of the simulation PC
 export ROS_DOMAIN_ID=0
-export RMW_FASTRTPS_USE_QOS_FROM_XML=1
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 
-cat > /tmp/fastdds_hil.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8" ?>
-<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
-  <transport_descriptors>
-    <transport_descriptor>
-      <transport_id>tcp_transport</transport_id>
-      <type>TCPv4</type>
-    </transport_descriptor>
-  </transport_descriptors>
-  <participant profile_name="default_profile" is_default_profile="true">
-    <rtps>
-      <userTransports>
-        <transport_id>tcp_transport</transport_id>
-      </userTransports>
-      <builtin>
-        <discovery_config>
-          <discoveryProtocol>CLIENT</discoveryProtocol>
-          <discoveryServersList>
-            <RemoteServer prefix="44.53.00.5f.45.50.52.4f.53.49.4d.41">
-              <metatrafficUnicastLocatorList>
-                <locator>
-                  <TCPv4>
-                    <address>192.168.1.100</address>  <!-- PC IP -->
-                    <physical_port>11811</physical_port>
-                    <port>11811</port>
-                  </TCPv4>
-                </locator>
-              </metatrafficUnicastLocatorList>
-            </RemoteServer>
-          </discoveryServersList>
-        </discovery_config>
-      </builtin>
-    </rtps>
-  </participant>
-</profiles>
-EOF
-
-export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastdds_hil.xml
+# Then launch your stack (example):
+ros2 launch f1tenth_stack bringup_launch.py
 ```
 
-#### Step 4 — Launch the Autoware or RoboRacer Stack on the remote PC or Jetson
-
-```bash
-# Example — adapt to your actual launch file
-ros2 launch roboracer_bringup sim_hil.launch.py
-```
-
-#### Step 5 — Verify Connectivity
+#### Step 3 — Verify Connectivity
 
 From the remote PC or Jetson:
 
@@ -371,9 +331,9 @@ From the simulation PC:
 ros2 topic echo /ego/drive    # Should show the commands sent by the Jetson
 ```
 
-> **Firewall note:** Ensure TCP port `11811` is open on the simulation PC: `sudo ufw allow 11811/tcp`
+> **Firewall note:** CycloneDDS uses UDP multicast (239.255.0.1) and unicast. Ensure UDP ports are not blocked: `sudo ufw allow from <remote-ip>` or disable the firewall on the LAN interface.
 >
-> **WiFi tip:** If using WiFi, pin FastDDS to the correct interface by setting `discovery_server_address` to the simulation PC's WiFi IP (e.g. `192.168.1.100:11811`) rather than `0.0.0.0`, and use the same IP in the remote client XML. This avoids discovery traffic being routed over the wrong adapter.
+> **WiFi / no-multicast networks:** If multicast is blocked (e.g. across VLANs), set `network_interface` to the simulation PC's IP on both sides via `CYCLONEDDS_URI`. See the [CycloneDDS docs](https://cyclonedds.io/docs/cyclonedds/latest/config/config_file_reference.html) for the full XML reference.
 
 ---
 
@@ -484,8 +444,8 @@ data/
 
 ### ROS 2 topics not visible
 - Confirm `ros2_domain_id` matches between Isaac Sim and your terminal (default: `0`).
-- If using FastDDS discovery server, ensure it is running: `fastdds discovery -i 0 -l 127.0.0.1 -p 11811`.
-- Check transport: `export FASTRTPS_DEFAULT_PROFILES_FILE=/workspace/autoware_off-road_sim/scripts/configs/fastdds_tcp.xml`.
+- If using CycloneDDS (default), ensure `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` is set on **both** machines and both are on the **same subnet** with multicast enabled. Look for `[ROS2] RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` in the terminal output to confirm.
+- Check that `ROS_DOMAIN_ID` is identical on both machines (default: `0`).
 
 ### GNSS topics not appearing
 
