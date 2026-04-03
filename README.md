@@ -4,7 +4,7 @@
 
 The Autoware-RoboRacer Off-road Simulator is a multi-vehicle high-fidelity simulation framework for **Autoware** and **RoboRacer** off-road race cars, built on [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim) with **ROS 2 Humble** integration. This simulator was developed for the **Autoware Off-road** project to facilitate the training and evaluation of autonomous driving algorithms within off-road and racing ODDs. This research is part of an ongoing collaboration between the Autoware Off-road/Racing Working Group and the Autoware Center of Excellence (CoE) at the University of Pennsylvania.
 
-The simulator features a **1/5th-scale RoboRacer-Max** model equipped with a comprehensive sensor suite: **3D LiDAR**, **RGB camera**, **GNSS**, **IMU**, and **odometry**. It includes a high-fidelity **pumptrack_simple** environment, featuring non-planar terrain specifically designed for challenging off-road testing. The framework facilitates **multi-vehicle configurations** via a versatile control interface that detects incoming **Autoware** and **RoboRacer** control message types, while supporting seamless **Hardware-in-the-Loop (HIL) testing** via FastDDS. Additional tools include a **semantic segmentation recorder** for perception training, built-in **keyboard teleoperation** for manual control, and an optimized launch and config system that is easy to use and ensures a perfect balance between simulation fidelity and real-time performance.
+The simulator features a **1/5th-scale RoboRacer-Max** model equipped with a comprehensive sensor suite: **3D LiDAR**, **RGB camera**, **GNSS**, **IMU**, and **odometry**. It includes a high-fidelity **pumptrack_simple** environment, featuring non-planar terrain specifically designed for challenging off-road testing. The framework facilitates **multi-vehicle configurations** via a versatile control interface that detects incoming **Autoware** and **RoboRacer** control message types, while supporting seamless **Hardware-in-the-Loop (HIL) testing** via CycloneDDS. Additional tools include a **semantic segmentation recorder** for perception training, built-in **keyboard teleoperation** for manual control, and an optimized launch and config system that is easy to use and ensures a perfect balance between simulation fidelity and real-time performance.
 
 ---
 
@@ -19,9 +19,10 @@ The simulator features a **1/5th-scale RoboRacer-Max** model equipped with a com
 7. [Control Interface](#control-interface)
 8. [Multi-Vehicle Setup](#multi-vehicle-setup)
 9. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
-10. [Viewport & Rendering Tips](#viewport--rendering-tips)
-11. [Utility Scripts](#utility-scripts)
-12. [Troubleshooting](#troubleshooting)
+10. [Performance Tuning](#performance-tuning)
+11. [Viewport & Rendering Tips](#viewport--rendering-tips)
+12. [Utility Scripts](#utility-scripts)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -156,7 +157,7 @@ This automatically sources the ROS 2 Humble environment and sets the working dir
 | `S` / `↓` | Accelerate backward |
 | `A` / `←` | Steer left |
 | `D` / `→` | Steer right |
-| `Space` | Emergency stop (reset speed and steer to 0) |
+| `Space` | Pause/Start the simulation |
 | `~` | Switch camera view to Perspective |
 | `1` | Switch camera view and **KEYBOARD_CONTROL** to Ego Vehicle |
 | `2` | Switch camera view and **KEYBOARD_CONTROL** to Opponent Vehicle |
@@ -438,13 +439,102 @@ data/
 
 ---
 
-## Viewport & Rendering Tips
+## Performance Tuning
 
-- **DLSS**: Enable `enable_DLSS_FPS_Multiplier_x2: true` in `viewport_settings` to use DLSS 2× upscaling for significantly higher FPS with minimal visual quality loss.
-- **Resolution**: Lowering `render_resolution` improves performance on slower GPUs.
-- **First launch**: Shader compilation runs automatically — expect a few minutes of delay before the viewport appears.
+The simulator prints a real-time factor (`RT=X%`) in the terminal status line. `RT=100%` means the simulation is keeping up with real-time. Below 100% the simulation is running slower than real-time.
+
+```
+[KEYBOARD_CONTROL] ACTIVE: Ego_Vehicle | Spd=+0.00 m/s, Str=+0.0° | RT=97%
+```
+
+All tuning knobs are in the `physics_settings` and `viewport_settings` blocks of the config file.
 
 ---
+
+### Physics Settings
+
+```yaml
+physics_settings:
+  time_steps_per_second: 55       # Physics tick rate (Hz)
+  solver_position_iterations: 8   # Per-articulation position solve passes
+  solver_velocity_iterations: 2   # Per-articulation velocity solve passes
+```
+
+#### `time_steps_per_second`
+
+Sets the physics substep rate. Each call to `simulation_app.update()` advances the simulation by `1 / time_steps_per_second` seconds. If the GPU/CPU cannot complete one update within that wall-clock budget, RT% drops below 100%.
+
+| Value | Effect |
+|---|---|
+| Higher (e.g. 120 Hz) | More accurate collision/suspension; higher CPU cost, lower RT% |
+| Lower (e.g. 55 Hz) | Lower CPU cost; good for single-vehicle use, higher RT% |
+| Too low (< 30 Hz) | Visible physics artifacts (tunnelling, jitter), vehicle breaking up |
+
+**Recommended starting point:** `55`–`60` Hz for a single RC car on a smooth track.
+
+#### `solver_position_iterations`
+
+Controls how many times per tick PhysX refines joint positions, contact penetration, and suspension geometry for each articulated vehicle.
+
+| Value | Effect |
+|---|---|
+| `16` (default) | Most accurate; highest CPU cost |
+| `8` | Good balance for RC cars with simple revolute joints |
+| `4` | Aggressive; stable on smooth terrain at low speed |
+| `< 4` | Joint drift, wheel clipping, possible explosion |
+
+#### `solver_velocity_iterations`
+
+Controls how many passes PhysX uses to resolve friction, restitution, and velocity damping.
+
+| Value | Effect |
+|---|---|
+| `4` (default) | Full accuracy; correct friction response |
+| `2` | Slightly reduced friction accuracy; cheaper |
+| `1` | Minimal cost; may show lateral sliding on tight corners |
+
+#### Typical configurations
+
+| Scenario | `time_steps_per_second` | `pos_iters` | `vel_iters` |
+|---|---|---|---|
+| Single vehicle, smooth track | 55–60 | 8 | 2 |
+| Two vehicles | 50–55 | 8 | 2 |
+| Maximum fidelity | 120 | 16 | 4 |
+| Maximum performance | 40–50 | 4 | 1 |
+
+> **Note:** `solver_type` is permanently set to `"PGS"` in code. TGS is faster but very unstable in racing scenarios. Vehicle breaks up easily.
+
+---
+
+### Viewport Settings
+
+```yaml
+viewport_settings:
+  render_resolution: [2560, 1440]
+  enable_DLSS_FPS_Multiplier_x2: false
+  disable_shadows: false
+  disable_ambient_occlusion: true
+  disable_reflections: true
+```
+
+#### `render_resolution`
+
+The resolution the RTX renderer produces each frame. Lowering this could improve the GPU performance.
+
+| Resolution | GPU cost |
+|---|---|
+| `[3840, 2160]` | Very High |
+| `[2560, 1440]` | High |
+| `[1920, 1080]` | Medium |
+| `[1280, 720]` | Low |
+
+#### `enable_DLSS_FPS_Multiplier_x2`
+
+Enables NVIDIA DLSS Super Resolution (Performance mode combined with DLSS-G 2× frame generation). Requires an RTX 40-series GPU for frame generation. On supported hardware this nearly doubles perceived FPS with minimal visual quality loss. However, it could lower the RT%.
+
+#### `disable_shadows` / `disable_ambient_occlusion`/ `disable_reflections`
+
+Disabling shadows, ambient occlusion, and reflections could help improve the GPU performance.
 
 ## Utility Scripts
 
@@ -452,6 +542,7 @@ data/
 |---|---|
 | `scripts/launch_sim.py` | Main simulation launcher (load USD, spawn vehicles, start keyboard control, record segmentation) |
 | `scripts/gnss_bridge.py` | Python 3.10 subprocess that publishes `sensor_msgs/NavSatFix` via rclpy (spawned automatically) |
+| `scripts/drive_bridge.py` | Python 3.10 subprocess that subscribes to per-vehicle `AckermannDriveStamped` and `autoware_control_msgs/Control` drive topics, forwarding commands to the Isaac Sim OmniGraph controller; also publishes `/map` and static TFs (spawned automatically) |
 
 ---
 

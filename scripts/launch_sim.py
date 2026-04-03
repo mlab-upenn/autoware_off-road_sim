@@ -130,6 +130,15 @@ def main():
             carb_settings.set_int("/rtx/post/dlss/execMode", 0)
             carb_settings.set_bool("/rtx-transient/dlssg/enabled", True)
             print("[Renderer] DLSS Performance + FPS Multiplier x2 (DLSS-G) enabled.")
+        if viewport_opts.get("disable_shadows", False):
+            carb_settings.set_bool("/rtx/shadows/enabled", False)
+            print("[Renderer] Shadows disabled.")
+        if viewport_opts.get("disable_ambient_occlusion", False):
+            carb_settings.set_bool("/rtx/ambientOcclusion/enabled", False)
+            print("[Renderer] Ambient occlusion disabled.")
+        if viewport_opts.get("disable_reflections", False):
+            carb_settings.set_bool("/rtx/reflections/enabled", False)
+            print("[Renderer] Reflections disabled.")
         print(f"Configured Viewport Render Resolution to {render_res[0]}x{render_res[1]} with FPS counter")
 
     # Prevent Isaac Sim Full from auto-adding a defaultLight to the stage.
@@ -225,8 +234,12 @@ def main():
     physics_opts = config.get("physics_settings", {})
     if physics_opts:
         from pxr import UsdPhysics, Sdf
-        solver_type = physics_opts.get("solver_type", "PGS")
+        solver_type = "PGS"  # TGS is unstable with wheeled vehicles
         time_steps = float(physics_opts.get("time_steps_per_second", 120.0))
+        enable_gpu  = False  # GPU dynamics disabled (incompatible with current USD setup)
+        bp_type     = "SAP"
+        pos_iters   = int(physics_opts.get("solver_position_iterations", 16))
+        vel_iters   = int(physics_opts.get("solver_velocity_iterations", 4))
 
         scenes_updated = False
         for prim in stage.Traverse():
@@ -239,6 +252,14 @@ def main():
                 if attr_ts: attr_ts.Set(time_steps)
                 else: prim.CreateAttribute("physxScene:timeStepsPerSecond", Sdf.ValueTypeNames.Float).Set(time_steps)
 
+                attr_gpu = prim.GetAttribute("physxScene:enableGPUDynamics")
+                if attr_gpu: attr_gpu.Set(enable_gpu)
+                else: prim.CreateAttribute("physxScene:enableGPUDynamics", Sdf.ValueTypeNames.Bool).Set(enable_gpu)
+
+                attr_bp = prim.GetAttribute("physxScene:broadphaseType")
+                if attr_bp: attr_bp.Set(bp_type)
+                else: prim.CreateAttribute("physxScene:broadphaseType", Sdf.ValueTypeNames.Token).Set(bp_type)
+
                 if scenes_updated:
                     # A duplicate PhysicsScene was found embedded in a vehicle or environment reference!
                     # This completely breaks the PhysX timeline synchronization and throws overlapping read warnings.
@@ -247,7 +268,7 @@ def main():
                     stage.RemovePrim(prim.GetPath())
                     continue
 
-                print(f"[Physics] Configured Primary PhysicsScene at '{prim.GetPath()}' -> Solver: {solver_type}, Time Steps: {time_steps}")
+                print(f"[Physics] Configured Primary PhysicsScene at '{prim.GetPath()}' -> Solver: {solver_type}, Steps: {time_steps}, GPU: {enable_gpu}, BP: {bp_type}")
                 scenes_updated = True
 
         if not scenes_updated:
@@ -256,7 +277,25 @@ def main():
             prim = scene.GetPrim()
             prim.CreateAttribute("physxScene:solverType", Sdf.ValueTypeNames.Token).Set(solver_type)
             prim.CreateAttribute("physxScene:timeStepsPerSecond", Sdf.ValueTypeNames.Float).Set(time_steps)
-            print(f"[Physics] Force-configured Singleton PhysicsScene at '/physicsScene' -> Solver: {solver_type}, Time Steps: {time_steps}")
+            prim.CreateAttribute("physxScene:enableGPUDynamics", Sdf.ValueTypeNames.Bool).Set(enable_gpu)
+            prim.CreateAttribute("physxScene:broadphaseType", Sdf.ValueTypeNames.Token).Set(bp_type)
+            print(f"[Physics] Force-configured Singleton PhysicsScene at '/physicsScene' -> Solver: {solver_type}, Steps: {time_steps}, GPU: {enable_gpu}, BP: {bp_type}")
+
+        # Apply per-articulation solver iteration counts to all articulation roots
+        try:
+            from pxr import PhysxSchema
+            for prim in stage.Traverse():
+                api = PhysxSchema.PhysxArticulationAPI(prim)
+                if api:
+                    attr_pi = prim.GetAttribute("physxArticulation:solverPositionIterationCount")
+                    if attr_pi: attr_pi.Set(pos_iters)
+                    else: prim.CreateAttribute("physxArticulation:solverPositionIterationCount", Sdf.ValueTypeNames.UInt).Set(pos_iters)
+                    attr_vi = prim.GetAttribute("physxArticulation:solverVelocityIterationCount")
+                    if attr_vi: attr_vi.Set(vel_iters)
+                    else: prim.CreateAttribute("physxArticulation:solverVelocityIterationCount", Sdf.ValueTypeNames.UInt).Set(vel_iters)
+            print(f"[Physics] Articulation solver iterations -> pos={pos_iters}, vel={vel_iters}")
+        except Exception as _e:
+            print(f"[Physics] Warning: Could not set articulation iterations: {_e}")
 
     # Enable ROS2 and Core nodes with defensive discovery to avoid version conflicts
     import omni.kit.app
@@ -1313,6 +1352,7 @@ def main():
     # ── Viewport HUD Overlay ──────────────────────────────────────────────────
     HUD_ENABLED = False
     hud_labels  = {}
+    ip_bar_window = None
     try:
         if headless_mode:
             raise RuntimeError("headless – skipping HUD")
@@ -1720,6 +1760,8 @@ def main():
     keyboard = None
     iteration = 0
     _restart_pending = False  # True for one frame while stop→play transition settles
+    _rt_wall_start = time.monotonic()
+    _rt_sim_dt = 1.0 / float(app_freq)  # simulated seconds per tick
 
     if headless_mode:
         _veh_names = list(veh_ctrl_mode.keys())
@@ -1743,7 +1785,10 @@ def main():
         if _restart_pending:
             timeline.play()
             _restart_pending = False
+            iteration = 0
+            _rt_wall_start = time.monotonic()
             print("[Sim] Simulation restarted.")
+            print("[Sim] NOTE: If RViz shows TF_OLD_DATA warnings for LiDAR, restart RViz to clear its stale TF buffer.")
             continue
         
         if not keyboard:
@@ -1833,6 +1878,8 @@ def main():
             # HUD Toggle
             if val_slash > 0.1 and not slash_pressed_last:
                 hud_window.visible = not hud_window.visible
+                if ip_bar_window is not None:
+                    ip_bar_window.visible = hud_window.visible
             slash_pressed_last = (val_slash > 0.1)
 
             # R — toggle segmentation recording
@@ -1965,7 +2012,9 @@ def main():
                         # by the vehicle's built-in ROS2 subscriber (if present).
                         _apply_speed, _apply_steer = _read_og_ctrl(_meta)
                 if iteration % max(1, app_freq // 10) == 0:
-                    print(f"\r[{_mode}] ACTIVE: {_ctrl_veh} | Spd={_apply_speed:+.2f} m/s, Str={float(_apply_steer) * 57.2958:+.1f}°          ", end="", flush=True)
+                    _wall_elapsed = time.monotonic() - _rt_wall_start
+                    _rt_pct = (iteration * _rt_sim_dt / _wall_elapsed * 100.0) if _wall_elapsed > 0 else 100.0
+                    print(f"\r[{_mode}] ACTIVE: {_ctrl_veh} | Spd={_apply_speed:+.2f} m/s, Str={float(_apply_steer) * 57.2958:+.1f}° | RT={_rt_pct:.0f}%   ", end="", flush=True)
             else:
                 # Reroute subscriber/publisher topics on mode change (non-selected vehicle).
                 # Must happen BEFORE continue so TELEOP mode mutes external ROS2 commands.
@@ -2090,15 +2139,15 @@ def main():
                     "front": stage.GetPrimAtPath(cfg["front_path"]) if cfg["front_path"] else None,
                     "rear": stage.GetPrimAtPath(cfg["rear_path"]) if cfg["rear_path"] else None,
                     "dist": cfg["dist"], "height": cfg["height"], "focus_height": cfg["focus_height"],
-                    "buf_x":  collections.deque(maxlen=100),
-                    "buf_y":  collections.deque(maxlen=100),
-                    "buf_z":  collections.deque(maxlen=100),
-                    "buf_lz": collections.deque(maxlen=100),
-                    # Rotation smoothing: forward-vector components averaged over ~60 frames
-                    # (~0.5 s at 120 Hz) to eliminate orientation jitter while still tracking turns
-                    "buf_fx": collections.deque(maxlen=60),
-                    "buf_fy": collections.deque(maxlen=60),
-                    "buf_fz": collections.deque(maxlen=60),
+                    "buf_x":  collections.deque(maxlen=40),
+                    "buf_y":  collections.deque(maxlen=40),
+                    "buf_z":  collections.deque(maxlen=40),
+                    "buf_lz": collections.deque(maxlen=40),
+                    # Rotation smoothing: forward-vector components averaged over ~24 frames
+                    # to eliminate orientation jitter while still tracking turns
+                    "buf_fx": collections.deque(maxlen=24),
+                    "buf_fy": collections.deque(maxlen=24),
+                    "buf_fz": collections.deque(maxlen=24),
                 }
                 follow_cam_handles[veh_name] = data
 

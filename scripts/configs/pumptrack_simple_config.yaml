@@ -5,16 +5,20 @@ environment:
   translation: [0.0, 0.0, 0.0]
 
 physics_settings:
-  solver_type: "PGS"               # PGS (stable) or TGS (fast)
-  time_steps_per_second: 120       # Physics tick rate (Hz)
+  time_steps_per_second: 55             # Physics tick rate (Hz)
+  solver_position_iterations: 8         # Per-articulation position iterations (default 16; 4 stable for RC car)
+  solver_velocity_iterations: 2         # Per-articulation velocity iterations (default 4)
 
 viewport_settings:
-  render_resolution: [2560, 1440]
+  render_resolution: [2560, 1440]       # [2560, 1440]
   enable_DLSS_FPS_Multiplier_x2: false  # Automatically enable DLSS FPS_Multiplier x2
+  disable_shadows: false                # Skip shadow map rendering (large GPU win)
+  disable_ambient_occlusion: true       # Skip screen-space AO
+  disable_reflections: true             # Skip RTX reflections
 
 keyboard_control_settings:
-  max_speed_m_s: 4.0
-  max_steer_rad: 0.52
+  max_speed_m_s: 6.0
+  max_steer_rad: 0.4
   acceleration_m_s2: 10.0
   deceleration_m_s2: 10.0
   steering_speed_rad_s: 3.0
@@ -41,9 +45,9 @@ vehicles:
     topic_prefix: "/opponent"
     spawn_position: [-2.0, 0.0, 0.0]
     spawn_orientation: [0.0, 0.0, -90.0]
-    enable_camera: true
-    enable_lidar: true
-    enable_gnss: true
+    enable_camera: false
+    enable_lidar: false
+    enable_gnss: false
 
 # These are the hardcoded topic names baked into the USD.
 # launch_sim.py will remap them to /{topic_prefix}/{topic} for each vehicle.
@@ -87,7 +91,7 @@ semantic_segmentation:
   color_map:
     0: [61, 93, 255]     # non-drivable  -> blue
     1: [0, 255, 220]     # drivable      -> Cyan
-  capture_frequency: 8   # Hz → every (120Hz / 8Hz) = 15 frames
+  capture_frequency: 4   # Hz → every (60Hz / 4Hz) = 15 frames
   image_resolution: [1280, 720]
   images_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/images"
   gt_masks_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/gt_masks"
