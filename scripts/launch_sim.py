@@ -42,6 +42,11 @@ def main():
     network_setup = config.get("network_setup", {})
     ros2_domain_id = network_setup.get("ros2_domain_id", 0)
     network_interface = network_setup.get("network_interface", "auto")
+    ros2_cmd_timeout_s = float(network_setup.get("ros2_cmd_timeout_s", 1.5))
+
+    ui_cfg = config.get("user_interface", {})
+    _ui_viewport_mode = not headless_mode and bool(ui_cfg.get("viewport_mode", False))
+    _ui_split_screen  = not headless_mode and bool(ui_cfg.get("split_screen", False))
 
     # ── CycloneDDS setup ──────────────────────────────────────────────────
     # Belt-and-suspenders: set RMW explicitly in case Isaac Sim's Python doesn't
@@ -82,7 +87,7 @@ def main():
     print(f"[ROS2] RMW_IMPLEMENTATION=rmw_cyclonedds_cpp  ROS_DOMAIN_ID={ros2_domain_id}")
 
     # Initialize the simulation app
-    viewport_opts = config.get("viewport_settings", {})
+    viewport_opts = config.get("graphics_settings", {})
     render_res = viewport_opts.get("render_resolution", [2560, 1440])
 
     # This must happen before other omni imports.
@@ -140,6 +145,25 @@ def main():
             carb_settings.set_bool("/rtx/reflections/enabled", False)
             print("[Renderer] Reflections disabled.")
         print(f"Configured Viewport Render Resolution to {render_res[0]}x{render_res[1]} with FPS counter")
+
+        # Viewport mode: hide all panels except the viewport at startup so they
+        # never appear to the user (not just closed after the fact).
+        if _ui_viewport_mode:
+            try:
+                import omni.ui as _ui_startup
+                for _pname in ["Stage", "Content", "Console", "Property", "Layer",
+                               "Semantics Schema Editor", "Action Graph",
+                               "Render Settings", "Statistics", "Profiler",
+                               "Animation Graph", "Physics", "Replicator",
+                               "Material Graph", "Robot Inspector"]:
+                    try:
+                        _ui_startup.Workspace.show_window(_pname, False)
+                    except Exception:
+                        pass
+                carb_settings.set_bool("/app/window/showMenu", False)
+                print("[UI] Viewport mode: panels suppressed at startup.")
+            except Exception as _vms_err:
+                print(f"[UI] Viewport mode startup error: {_vms_err}")
 
     # Prevent Isaac Sim Full from auto-adding a defaultLight to the stage.
     # The environment USD already contains a DomeLight; a second light would alter the scene.
@@ -754,12 +778,15 @@ def main():
             env=_drv_env,
         )
 
-        # Send vehicle subscription registrations.
+        # Send vehicle subscription registrations and record them for restart.
+        _drv_sub_cmds = []
         for _veh in vehicles:
             if not _veh.get("enabled", True): continue
             _vn = _veh.get("name", "Vehicle")
             _vp = "/" + _veh.get("topic_prefix", f"/{_vn.lower()}").strip("/")
-            _drive_proc.stdin.write(f"sub\t{_vn}\t{_vp}/drive\t{_vp}/control\n")
+            _cmd = f"sub\t{_vn}\t{_vp}/drive\t{_vp}/control\n"
+            _drv_sub_cmds.append(_cmd)
+            _drive_proc.stdin.write(_cmd)
         _drive_proc.stdin.write("start\n")
         _drive_proc.stdin.flush()
 
@@ -772,8 +799,10 @@ def main():
                 f"see {_drv_log_path} for details")
 
         # Background thread: read drive commands from subprocess stdout.
-        def _drive_reader():
-            for _dl in _drive_proc.stdout:
+        # Takes the proc handle as an arg so the thread stays bound to the
+        # specific process it was started for (allows safe bridge restarts).
+        def _drive_reader(_proc):
+            for _dl in _proc.stdout:
                 _dl = _dl.strip()
                 if not _dl.startswith("cmd\t"):
                     continue
@@ -788,8 +817,9 @@ def main():
                 except Exception:
                     pass
 
-        _drv_threading.Thread(target=_drive_reader, daemon=True).start()
+        _drv_threading.Thread(target=_drive_reader, args=(_drive_proc,), daemon=True).start()
         _ros_bridge_enabled = True
+        _drv_post_cmds = []   # map + static-TF commands, resent to fresh bridge on restart
         print("[ROS2 Bridge] Drive bridge ready — AckermannDriveStamped on /drive, "
               "autoware_control_msgs/Control on /control")
     except Exception as _bridge_err:
@@ -915,6 +945,11 @@ def main():
     # After timeline.play() the OmniGraph runtime is live, so node.get_attributes()
     # exposes all inputs including defaults — this pass catches the missed ones.
     _sensor_topics_set = set(sensor_topics)
+    # Collect (node_path, attr_name, value) tuples for frame ID remaps so they
+    # can be re-applied every tick.  OmniGraph nodes may reset authored attribute
+    # values to their defaults after events such as graph re-evaluation or after
+    # a new connection is made, so a one-time post-play write is not reliable.
+    _og_frame_id_remaps = []   # [(node_path_str, og_attr_name_str, new_val_str), ...]
     for veh in vehicles:
         if not veh.get("enabled", True):
             continue
@@ -997,6 +1032,9 @@ def main():
                             try: _oa.set(_new_fval)
                             except Exception: pass
                             _fid_count += 1
+                            # Record for per-tick re-application (OG nodes may
+                            # reset authored values to defaults after graph events).
+                            _og_frame_id_remaps.append((p_path, _aname, _new_fval))
                             print(f"[ROS2 remap OG] {veh_name}: {prim.GetPath().GetName()}.{_aname} "
                                   f"'{_fval}' -> '{_new_fval}'")
                         except Exception: pass
@@ -1144,10 +1182,11 @@ def main():
                 _map_flat = _map_occ.flatten().tolist()
                 _map_raw  = _map_struct.pack(f"{len(_map_flat)}b", *_map_flat)
                 _map_db64 = _map_b64.b64encode(_map_raw).decode("ascii")
-                _drive_proc.stdin.write(
-                    f"map\t{int(_map_pw)}\t{int(_map_ph)}\t{_map_res}"
-                    f"\t{float(_map_orig_x)}\t{float(_map_orig_y)}\t{_map_db64}\n")
+                _map_cmd = (f"map\t{int(_map_pw)}\t{int(_map_ph)}\t{_map_res}"
+                            f"\t{float(_map_orig_x)}\t{float(_map_orig_y)}\t{_map_db64}\n")
+                _drive_proc.stdin.write(_map_cmd)
                 _drive_proc.stdin.flush()
+                _drv_post_cmds.append(_map_cmd)
                 print(f"[Map] Sent /map to bridge: {_map_pw}×{_map_ph} cells @ {_map_res} m/cell")
 
                 # Static map→{prefix}/odom identity transforms, one per enabled vehicle.
@@ -1157,7 +1196,9 @@ def main():
                     _mvpfx = "/" + _mv.get("topic_prefix",
                                           f"/{_mv.get('name','').lower()}").strip("/")
                     _mv_odom_frame = _mvpfx.strip("/") + "/odom"
-                    _drive_proc.stdin.write(f"tf\tmap\t{_mv_odom_frame}\n")
+                    _tf_cmd = f"tf\tmap\t{_mv_odom_frame}\n"
+                    _drive_proc.stdin.write(_tf_cmd)
+                    _drv_post_cmds.append(_tf_cmd)
                     _odom_frames.append(_mv_odom_frame)
                 _drive_proc.stdin.flush()
                 print(f"[Map] Sent static map→odom TFs to bridge: {', '.join(_odom_frames)}")
@@ -1173,6 +1214,13 @@ def main():
             import traceback as _map_tb
             print(f"[Map] Error during map generation: {_map_err}")
             _map_tb.print_exc()
+
+    # Pre-initialise GNSS restart variables so the main loop can safely test
+    # them even when GNSS is disabled or its setup block hasn't run.
+    _gnss_proc   = None
+    _gnss_script = None
+    _gnss_env    = None
+    _gnss_log    = None
 
     # ── GNSS Sensor Setup ─────────────────────────────────────────────────────
     # Reads each vehicle's base_link world position from USD every frame, converts
@@ -1353,6 +1401,9 @@ def main():
     HUD_ENABLED = False
     hud_labels  = {}
     ip_bar_window = None
+    opp_hud_window = None
+    _hud_all_windows = []  # all HUD windows; toggled together by the / key
+    _split_active = False  # set properly inside HUD block; False in headless mode
     try:
         if headless_mode:
             raise RuntimeError("headless – skipping HUD")
@@ -1373,7 +1424,13 @@ def main():
         GAP    = 16
 
         enabled_vehicles = [v for v in vehicles if v.get("enabled", True)]
-        _n_veh = max(1, len(enabled_vehicles))
+        # In split-screen mode the main (left) window shows only the Ego vehicle.
+        _split_active = _ui_split_screen and len(enabled_vehicles) >= 2
+        _main_vehs = [v for v in enabled_vehicles
+                      if not _split_active or "Ego" in v.get("name", "")]
+        _opp_vehs  = [v for v in enabled_vehicles
+                      if _split_active and "Ego" not in v.get("name", "")]
+        _n_veh = max(1, len(_main_vehs))
 
         # Scale card height so the combined HUD never exceeds the Isaac Sim window height.
         # position_y=100 consumes 100 px at the top; reserve 20 px at the bottom.
@@ -1394,14 +1451,23 @@ def main():
         SPACER_SM   = max(1,   int(4   * _sc))
 
         total_w = CARD_W + 16
-        total_h = (CARD_H + GAP) * _n_veh + 16
+        _ip_bar_h = FONT_ROW + CARD_MARGIN * 2
+        try:
+            import socket as _sock
+            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+            _s.connect(("8.8.8.8", 80))
+            _local_ip = _s.getsockname()[0]
+            _s.close()
+        except Exception:
+            _local_ip = "?"
+        total_h = (CARD_H + GAP) * _n_veh + _ip_bar_h + GAP + 16
 
         hud_window = ui.Window(
             "VehicleStatusHUD",
             width=total_w,
             height=total_h,
             position_x=70,
-            position_y=70,
+            position_y=95,
             flags=(
                 ui.WINDOW_FLAGS_NO_TITLE_BAR
                 | ui.WINDOW_FLAGS_NO_SCROLLBAR
@@ -1424,7 +1490,7 @@ def main():
         with hud_window.frame:
             with ui.VStack(spacing=GAP, width=total_w):
                 # Sort to ensure Ego is on top
-                sorted_vehs = sorted(enabled_vehicles, key=lambda x: "Ego" not in x["name"])
+                sorted_vehs = sorted(_main_vehs, key=lambda x: "Ego" not in x["name"])
                 for veh in sorted_vehs:
                     veh_name = veh.get("name", "Vehicle")
                     models = {}
@@ -1473,46 +1539,93 @@ def main():
 
                     hud_labels[veh_name] = models
 
-        print("[HUD] Viewport overlay window created.")
-
-        # ── IP address card — flush below the vehicle HUD cards ──────────────
-        try:
-            import socket as _sock
-            try:
-                _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                _s.connect(("8.8.8.8", 80))
-                _local_ip = _s.getsockname()[0]
-                _s.close()
-            except Exception:
-                _local_ip = "?"
-
-            _ip_bar_h = FONT_ROW + CARD_MARGIN * 2
-            ip_bar_window = ui.Window(
-                "IPStatusBar",
-                width=total_w,
-                height=_ip_bar_h,
-                position_x=70,
-                position_y=10 + total_h + 35,
-                flags=(
-                    ui.WINDOW_FLAGS_NO_TITLE_BAR
-                    | ui.WINDOW_FLAGS_NO_SCROLLBAR
-                    | ui.WINDOW_FLAGS_NO_RESIZE
-                    | ui.WINDOW_FLAGS_NO_MOVE
-                ),
-            )
-            ip_bar_window.frame.set_style({"background_color": 0x00000000})
-            with ip_bar_window.frame:
+                # IP address card — embedded at the bottom of the vehicle HUD
                 with ui.ZStack(width=CARD_W, height=_ip_bar_h):
-                    # Same semi-transparent background as the vehicle cards
                     ui.Rectangle(style={"background_color": 0x55383838, "border_radius": 8})
                     with ui.HStack(margin=CARD_MARGIN):
                         ui.Label("IP ADDRESS:", style={"color": C_WHITE, "font_size": FONT_ROW},
                                  width=LABEL_W + INDENT_W)
                         ui.Label(_local_ip, style={"color": C_WHITE, "font_size": FONT_ROW},
                                  width=ui.Fraction(1))
-            print(f"[HUD] IP address card: {_local_ip}")
-        except Exception as _ip_err:
-            print(f"[HUD] IP address card skipped: {_ip_err}")
+
+        print("[HUD] Viewport overlay window created.")
+
+        # ── Opponent HUD window (split-screen right side) ─────────────────────
+        opp_hud_window = None
+        _hud_all_windows = [hud_window]
+        if _split_active and _opp_vehs:
+            try:
+                _opp_n = len(_opp_vehs)
+                _opp_total_h = (CARD_H + GAP) * _opp_n + 16
+                _win_w = _app_win.get_width() if _app_win else render_res[0]
+                _opp_x = _win_w // 2 + 10
+                opp_hud_window = ui.Window(
+                    "OpponentStatusHUD",
+                    width=total_w,
+                    height=_opp_total_h,
+                    position_x=_opp_x,
+                    position_y=95,
+                    flags=(
+                        ui.WINDOW_FLAGS_NO_TITLE_BAR
+                        | ui.WINDOW_FLAGS_NO_SCROLLBAR
+                        | ui.WINDOW_FLAGS_NO_RESIZE
+                        | ui.WINDOW_FLAGS_NO_MOVE
+                    ),
+                )
+                opp_hud_window.frame.set_style({"background_color": 0x00000000})
+                with opp_hud_window.frame:
+                    with ui.VStack(spacing=GAP, width=total_w):
+                        for _ov in _opp_vehs:
+                            _ovn = _ov.get("name", "Vehicle")
+                            _omodels = {}
+                            with ui.ZStack(width=CARD_W, height=CARD_H):
+                                ui.Rectangle(style={"background_color": 0x55383838, "border_radius": 8})
+                                with ui.VStack(spacing=2, margin=CARD_MARGIN):
+                                    _oh_color = C_CYAN if "Ego" in _ovn else C_WHITE
+                                    _ohdr = ui.Label(_ovn.replace("_", " "),
+                                                     alignment=ui.Alignment.CENTER,
+                                                     style={"color": _oh_color,
+                                                            "font_size": FONT_HEADER,
+                                                            "font_style": "Bold"})
+                                    _omodels["header"] = _ohdr
+
+                                    def _orow(label_text):
+                                        with ui.HStack():
+                                            ui.Spacer(width=INDENT_W)
+                                            ui.Label(f"{label_text}:",
+                                                     style={"color": C_WHITE, "font_size": FONT_ROW},
+                                                     width=LABEL_W)
+                                            _vl = ui.Label("--",
+                                                           style={"color": C_WHITE, "font_size": FONT_ROW},
+                                                           width=ui.Fraction(1))
+                                            return _vl
+
+                                    ui.Spacer(height=SPACER_SM)
+                                    _omodels["ctrl_src"] = _label("CONTROL: KEYBOARD", C_WHITE, FONT_ROW, bold=True)
+                                    _omodels["speed"]    = _orow("Speed")
+                                    _omodels["steer"]    = _orow("Steer")
+                                    ui.Spacer(height=SPACER_SM)
+                                    _label("ODOMETRY", C_WHITE, FONT_ROW, bold=True)
+                                    _omodels["pos_x"]   = _orow("Pos X")
+                                    _omodels["pos_y"]   = _orow("Pos Y")
+                                    _omodels["pos_z"]   = _orow("Pos Z")
+                                    _omodels["lin_vel"] = _orow("Lin Vel")
+                                    _omodels["ang_vel"] = _orow("Ang Vel")
+                                    ui.Spacer(height=SPACER_SM)
+                                    _label("IMU", C_WHITE, FONT_ROW, bold=True)
+                                    _omodels["lin_acc"] = _orow("Lin Acc")
+                                    _omodels["ang_acc"] = _orow("Ang Acc")
+                                    ui.Spacer(height=SPACER_SM)
+                                    _label("GNSS", C_WHITE, FONT_ROW, bold=True)
+                                    _omodels["gnss_lat"] = _orow("Lat")
+                                    _omodels["gnss_lon"] = _orow("Lon")
+                            hud_labels[_ovn] = _omodels
+                _hud_all_windows.append(opp_hud_window)
+                print(f"[HUD] Opponent HUD window created at x={_opp_x}.")
+            except Exception as _opp_err:
+                print(f"[HUD] Opponent HUD creation error: {_opp_err}")
+
+        print(f"[HUD] IP address: {_local_ip}")
 
     except Exception as e:
         HUD_ENABLED = False
@@ -1555,6 +1668,9 @@ def main():
 
     # ── Simulation Selection & Interaction State ──────────────────────────────
     selected_vehicle_name = "Ego_Vehicle"
+    _vp2_api     = None              # viewport_api of Viewport 2, stored at split-screen setup
+    _vp1_showing = "Ego_Vehicle"     # vehicle camera currently shown in Viewport 1
+    _vp2_showing = "Opponent_Vehicle"  # vehicle camera currently shown in Viewport 2
     slash_pressed_last = False
     r_pressed_last = False
     grave_pressed_last = False
@@ -1576,6 +1692,7 @@ def main():
     # Track the last mode each vehicle's OmniGraph publisher was routed for,
     # so we only call og.Controller.set() on the topicName when it actually changes.
     _pub_routed_mode = {}  # veh_name -> "KEYBOARD_CONTROL" or "ROS2_CONTROL"
+    _last_n_status_lines = 0  # how many status lines were last printed (for cursor-up)
 
     is_recording = False
     seg_capture_index = 0
@@ -1588,10 +1705,21 @@ def main():
         except Exception: pass
 
     def switch_selection(new_name):
-        nonlocal selected_vehicle_name
+        nonlocal selected_vehicle_name, _vp1_showing, _vp2_showing
         # Always update the follow camera, even if this vehicle is already selected
         if new_name in veh_follow_configs:
             _cfg = veh_follow_configs[new_name]
+            # Track which viewport receives this camera for keyboard routing and HUD content
+            if _split_active and _vp2_api is not None:
+                try:
+                    from omni.kit.viewport.utility import get_active_viewport as _gav
+                    _active_is_vp2 = (_gav() is _vp2_api)
+                    if _active_is_vp2:
+                        _vp2_showing = new_name
+                    else:
+                        _vp1_showing = new_name
+                except Exception:
+                    pass
             _set_viewport_camera(f"/World/{_cfg['cam_name']}")
 
         # Only update selection state and HUD if vehicle actually changed
@@ -1601,10 +1729,11 @@ def main():
         print(f"[Selection] Switching to {new_name}")
         selected_vehicle_name = new_name
 
-        for v_name, models in hud_labels.items():
-            if "header" in models:
-                color = C_BLUE if (new_name == v_name) else C_WHITE
-                models["header"].style = {"color": color, "font_size": 18, "font_style": "Bold", "alignment": ui.Alignment.CENTER}
+        if not _split_active:
+            for v_name, models in hud_labels.items():
+                if "header" in models:
+                    color = C_BLUE if (new_name == v_name) else C_WHITE
+                    models["header"].style = {"color": color, "font_size": FONT_HEADER, "font_style": "Bold", "alignment": ui.Alignment.CENTER}
 
     # ── Segmentation Dataset Setup ────────────────────────────────────────────
     seg_cfg = config.get("semantic_segmentation", {})
@@ -1744,6 +1873,40 @@ def main():
             print(f"[Segmentation] Setup error: {_seg_err}")
             seg_enabled = False
 
+    def _rviz_reset():
+        """Trigger RViz2's File > Reset if RViz2 is open, via xdotool.
+        Clears RViz2's internal TF buffer so stale frames from before a sim
+        restart don't cause TF_OLD_DATA warnings after the bridge is restarted.
+        """
+        import os as _rv_os, shutil as _rv_sh, subprocess as _rv_sp, time as _rv_t
+        try:
+            if not _rv_os.environ.get("DISPLAY"):
+                return
+            if not _rv_sh.which("xdotool"):
+                return
+            _r = _rv_sp.run(["pgrep", "-x", "rviz2"], capture_output=True, timeout=1)
+            if _r.returncode != 0:
+                return
+            _r = _rv_sp.run(["xdotool", "search", "--classname", "rviz2"],
+                            capture_output=True, text=True, timeout=2)
+            if not _r.stdout.strip():
+                _r = _rv_sp.run(["xdotool", "search", "--name", "RViz"],
+                                capture_output=True, text=True, timeout=2)
+            _wids = _r.stdout.strip().split()
+            if not _wids:
+                return
+            _wid = _wids[0]
+            _rv_sp.run(["xdotool", "windowfocus", "--sync", _wid], capture_output=True, timeout=2)
+            _rv_t.sleep(0.1)
+            _rv_sp.run(["xdotool", "key", "--window", _wid, "--clearmodifiers", "alt+F"],
+                       capture_output=True, timeout=2)
+            _rv_t.sleep(0.15)
+            _rv_sp.run(["xdotool", "key", "--window", _wid, "--clearmodifiers", "r"],
+                       capture_output=True, timeout=2)
+            print("[RViz] Reset triggered.")
+        except Exception:
+            pass
+
     # ── Simulation Loop ───────────────────────────────────────────────────────
     ts = config.get("keyboard_control_settings", {})
     MAX_SPEED = float(ts.get("max_speed_m_s", 15.0))
@@ -1754,12 +1917,17 @@ def main():
     
     current_speed = 0.0
     current_steer = 0.0
+    opp_speed = 0.0
+    opp_steer = 0.0
     dt_teleop = 1.0 / float(app_freq)
     
     input_iface = carb.input.acquire_input_interface()
     keyboard = None
     iteration = 0
     _restart_pending = False  # True for one frame while stop→play transition settles
+    _soft_restart_time = 0.0  # sim clock value at the moment of last restart trigger
+    _ui_setup_done = False    # One-time viewport/panel setup after first follow-cam init
+    _dock_vp2_iteration = -1  # Defers viewport docking by a few frames to ensure UI readiness
     _rt_wall_start = time.monotonic()
     _rt_sim_dt = 1.0 / float(app_freq)  # simulated seconds per tick
 
@@ -1783,14 +1951,92 @@ def main():
         # views (odometry / IMU getVelocities) have fully torn down before OmniGraph
         # nodes execute again.  Skip all OmniGraph reads this frame.
         if _restart_pending:
+            # ── Restart ROS bridges ───────────────────────────────────────────
+            # Killing and respawning the bridge subprocesses gives both rclpy
+            # nodes a fresh TF buffer (cache_time = 2 s) with no stale entries
+            # from the previous run.  This is the definitive fix for the
+            # TF_OLD_DATA / LiDAR blackout: new rclpy node = new /tf publisher
+            # = Rviz resets its TF cache for that connection instantly.
+            if _ros_bridge_enabled and _drive_proc is not None:
+                try:
+                    _drive_proc.stdin.close()
+                except Exception:
+                    pass
+                try:
+                    _drive_proc.terminate()
+                    _drive_proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+                try:
+                    _drive_proc = _drv_sub.Popen(
+                        ["/usr/bin/python3.10", _drv_script],
+                        stdin=_drv_sub.PIPE, stdout=_drv_sub.PIPE,
+                        stderr=_drive_log, text=True, env=_drv_env)
+                    for _rc in _drv_sub_cmds:
+                        _drive_proc.stdin.write(_rc)
+                    _drive_proc.stdin.write("start\n")
+                    _drive_proc.stdin.flush()
+                    _drv_rdy = _drive_proc.stdout.readline().strip()
+                    if _drv_rdy == "ready":
+                        _drv_threading.Thread(
+                            target=_drive_reader, args=(_drive_proc,),
+                            daemon=True).start()
+                        for _pc in _drv_post_cmds:
+                            _drive_proc.stdin.write(_pc)
+                        _drive_proc.stdin.flush()
+                        print("[ROS2 Bridge] Drive bridge restarted.")
+                    else:
+                        print(f"[ROS2 Bridge] Drive bridge restart failed: {_drv_rdy!r}")
+                except Exception as _drv_rerr:
+                    print(f"[ROS2 Bridge] Drive bridge restart error: {_drv_rerr}")
+
+            if _gnss_enabled and _gnss_proc is not None and _gnss_script is not None:
+                try:
+                    _gnss_proc.stdin.close()
+                except Exception:
+                    pass
+                try:
+                    _gnss_proc.terminate()
+                    _gnss_proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+                try:
+                    _gnss_proc = subprocess.Popen(
+                        ["/usr/bin/python3.10", _gnss_script],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=_gnss_log, text=True, env=_gnss_env)
+                    _gnss_rdy = _gnss_proc.stdout.readline().strip()
+                    if _gnss_rdy == "ready":
+                        _gnss_bridge = _gnss_proc
+                        print("[GNSS] GNSS bridge restarted.")
+                    else:
+                        print(f"[GNSS] GNSS bridge restart failed: {_gnss_rdy!r}")
+                except Exception as _gnss_rerr:
+                    print(f"[GNSS] GNSS bridge restart error: {_gnss_rerr}")
+
+            # ── Resume simulation ─────────────────────────────────────────────
+            _rviz_reset()
+            timeline.set_current_time(_soft_restart_time + 3.0)
             timeline.play()
             _restart_pending = False
             iteration = 0
             _rt_wall_start = time.monotonic()
+            _last_n_status_lines = 0
             print("[Sim] Simulation restarted.")
-            print("[Sim] NOTE: If RViz shows TF_OLD_DATA warnings for LiDAR, restart RViz to clear its stale TF buffer.")
             continue
-        
+
+        # ── Periodic frame-ID re-application ──────────────────────────────────
+        # OmniGraph nodes may reset authored attribute values to defaults after
+        # graph re-evaluation events.  Re-applying every 60 ticks (≈1 s at 60 Hz)
+        # keeps the TF publisher frame IDs namespaced so the TF chain
+        # ego/base_link → ego/odom → map stays intact in RViz.
+        if _og_frame_id_remaps and iteration % 60 == 1:
+            for _fir_path, _fir_attr, _fir_val in _og_frame_id_remaps:
+                try:
+                    og.Controller.set(og.Controller.attribute(f"{_fir_path}.{_fir_attr}"), _fir_val)
+                except Exception:
+                    pass
+
         if not keyboard:
             appwindow = omni.appwindow.get_default_app_window()
             if appwindow: keyboard = appwindow.get_keyboard()
@@ -1826,9 +2072,12 @@ def main():
             # Backspace — restart simulation (stop now, play deferred one frame)
             if val_backspace > 0.1 and not backspace_pressed_last:
                 print("[Sim] Restarting simulation...")
+                _soft_restart_time = float(iteration) * _rt_sim_dt  # sim clock at stop
                 timeline.stop()
                 current_speed = 0.0
                 current_steer = 0.0
+                opp_speed = 0.0
+                opp_steer = 0.0
                 _restart_pending = True
             backspace_pressed_last = (val_backspace > 0.1)
 
@@ -1875,11 +2124,11 @@ def main():
                     key2_toggle_fired = False
                 choice_keys_pressed_last[K_2] = key2_down
 
-            # HUD Toggle
+            # HUD Toggle (toggles main + opponent windows together)
             if val_slash > 0.1 and not slash_pressed_last:
-                hud_window.visible = not hud_window.visible
-                if ip_bar_window is not None:
-                    ip_bar_window.visible = hud_window.visible
+                _hud_vis = not hud_window.visible
+                for _hw in _hud_all_windows:
+                    _hw.visible = _hud_vis
             slash_pressed_last = (val_slash > 0.1)
 
             # R — toggle segmentation recording
@@ -1896,24 +2145,66 @@ def main():
             r_pressed_last = (val_r > 0.1)
         
         # Teleop Logic
-        pressed_throttle = (val_w > 0.0 or val_up > 0.0 or val_s > 0.0 or val_down > 0.0 or val_space > 0.0)
-        pressed_steer = (val_a > 0.0 or val_left > 0.0 or val_d > 0.0 or val_right > 0.0 or val_space > 0.0)
         f_dt = float(dt_teleop)
-        if val_w > 0.0 or val_up > 0.0:    current_speed += ACCEL * f_dt
-        elif val_s > 0.0 or val_down > 0.0: current_speed -= ACCEL * f_dt
-        if val_a > 0.0 or val_left > 0.0:  current_steer += STEER_SPEED * f_dt
-        elif val_d > 0.0 or val_right > 0.0: current_steer -= STEER_SPEED * f_dt
-        if val_space > 0.0: current_speed = current_steer = 0.0
+        if _split_active:
+            # Split-screen: WASD drives ego, arrow keys drive opponent independently.
+            pressed_throttle_ego = (val_w > 0.0 or val_s > 0.0 or val_space > 0.0)
+            pressed_steer_ego    = (val_a > 0.0 or val_d > 0.0 or val_space > 0.0)
+            pressed_throttle_opp = (val_up > 0.0 or val_down > 0.0 or val_space > 0.0)
+            pressed_steer_opp    = (val_left > 0.0 or val_right > 0.0 or val_space > 0.0)
+            pressed_throttle = pressed_throttle_ego or pressed_throttle_opp
+            pressed_steer    = pressed_steer_ego or pressed_steer_opp
 
-        # Autocentering
-        if not pressed_throttle:
-            if current_speed > 0.0: current_speed = max(0.0, current_speed - DECEL * f_dt)
-            elif current_speed < 0.0: current_speed = min(0.0, current_speed + DECEL * f_dt)
-        if not pressed_steer:
-            if current_steer > 0.0: current_steer = max(0.0, current_steer - (STEER_SPEED * 2.0) * f_dt)
-            elif current_steer < 0.0: current_steer = min(0.0, current_steer + (STEER_SPEED * 2.0) * f_dt)
-        current_speed = max(min(current_speed, MAX_SPEED), -MAX_SPEED)
-        current_steer = max(min(current_steer, MAX_STEER), -MAX_STEER)
+            if val_w > 0.0:    current_speed += ACCEL * f_dt
+            elif val_s > 0.0:  current_speed -= ACCEL * f_dt
+            if val_a > 0.0:    current_steer += STEER_SPEED * f_dt
+            elif val_d > 0.0:  current_steer -= STEER_SPEED * f_dt
+            if val_space > 0.0: current_speed = current_steer = 0.0
+
+            if val_up > 0.0:    opp_speed += ACCEL * f_dt
+            elif val_down > 0.0: opp_speed -= ACCEL * f_dt
+            if val_left > 0.0:  opp_steer += STEER_SPEED * f_dt
+            elif val_right > 0.0: opp_steer -= STEER_SPEED * f_dt
+            if val_space > 0.0: opp_speed = opp_steer = 0.0
+
+            # Autocentering ego
+            if not pressed_throttle_ego:
+                if current_speed > 0.0: current_speed = max(0.0, current_speed - DECEL * f_dt)
+                elif current_speed < 0.0: current_speed = min(0.0, current_speed + DECEL * f_dt)
+            if not pressed_steer_ego:
+                if current_steer > 0.0: current_steer = max(0.0, current_steer - (STEER_SPEED * 2.0) * f_dt)
+                elif current_steer < 0.0: current_steer = min(0.0, current_steer + (STEER_SPEED * 2.0) * f_dt)
+            current_speed = max(min(current_speed, MAX_SPEED), -MAX_SPEED)
+            current_steer = max(min(current_steer, MAX_STEER), -MAX_STEER)
+
+            # Autocentering opponent
+            if not pressed_throttle_opp:
+                if opp_speed > 0.0: opp_speed = max(0.0, opp_speed - DECEL * f_dt)
+                elif opp_speed < 0.0: opp_speed = min(0.0, opp_speed + DECEL * f_dt)
+            if not pressed_steer_opp:
+                if opp_steer > 0.0: opp_steer = max(0.0, opp_steer - (STEER_SPEED * 2.0) * f_dt)
+                elif opp_steer < 0.0: opp_steer = min(0.0, opp_steer + (STEER_SPEED * 2.0) * f_dt)
+            opp_speed = max(min(opp_speed, MAX_SPEED), -MAX_SPEED)
+            opp_steer = max(min(opp_steer, MAX_STEER), -MAX_STEER)
+        else:
+            # Single screen: WASD and arrow keys both drive the selected vehicle.
+            pressed_throttle = (val_w > 0.0 or val_up > 0.0 or val_s > 0.0 or val_down > 0.0 or val_space > 0.0)
+            pressed_steer = (val_a > 0.0 or val_left > 0.0 or val_d > 0.0 or val_right > 0.0 or val_space > 0.0)
+            if val_w > 0.0 or val_up > 0.0:    current_speed += ACCEL * f_dt
+            elif val_s > 0.0 or val_down > 0.0: current_speed -= ACCEL * f_dt
+            if val_a > 0.0 or val_left > 0.0:  current_steer += STEER_SPEED * f_dt
+            elif val_d > 0.0 or val_right > 0.0: current_steer -= STEER_SPEED * f_dt
+            if val_space > 0.0: current_speed = current_steer = 0.0
+
+            # Autocentering
+            if not pressed_throttle:
+                if current_speed > 0.0: current_speed = max(0.0, current_speed - DECEL * f_dt)
+                elif current_speed < 0.0: current_speed = min(0.0, current_speed + DECEL * f_dt)
+            if not pressed_steer:
+                if current_steer > 0.0: current_steer = max(0.0, current_steer - (STEER_SPEED * 2.0) * f_dt)
+                elif current_steer < 0.0: current_steer = min(0.0, current_steer + (STEER_SPEED * 2.0) * f_dt)
+            current_speed = max(min(current_speed, MAX_SPEED), -MAX_SPEED)
+            current_steer = max(min(current_steer, MAX_STEER), -MAX_STEER)
         
         # Drive commands arrive via _drive_reader background thread (drive_bridge.py subprocess).
 
@@ -1990,6 +2281,14 @@ def main():
                                         break
                     except Exception: pass
 
+        # Keyboard routing: WASD → VP1 vehicle, arrows → VP2 vehicle.
+        if _split_active:
+            _kbd_vp1_veh = _vp1_showing
+            _kbd_vp2_veh = _vp2_showing
+        else:
+            _kbd_vp1_veh = selected_vehicle_name
+            _kbd_vp2_veh = selected_vehicle_name
+
         _hud_cmds = {}  # veh_name -> (speed, steer) actually applied this tick
         for _ctrl_veh, _meta in vehicle_teleop_publishers.items():
             _mode = veh_ctrl_mode.get(_ctrl_veh, "KEYBOARD_CONTROL")
@@ -1997,12 +2296,24 @@ def main():
             # In TELEOP mode the ROS2 bridge is never consulted — only keyboard runs.
             if _mode == "ROS2_CONTROL":
                 _drv = _drive_cmds.get(_ctrl_veh)
-                _ext = _drv if (_drv and (time.monotonic() - float(_drv["stamp"])) < 0.5) else None
+                _ext = _drv if (_drv and (time.monotonic() - float(_drv["stamp"])) < ros2_cmd_timeout_s) else None
             else:
                 _ext = None
             if _ctrl_veh == selected_vehicle_name:
                 if _mode == "KEYBOARD_CONTROL":
-                    _apply_speed, _apply_steer = current_speed, current_steer
+                    if _split_active:
+                        if _ctrl_veh == _kbd_vp1_veh and _ctrl_veh == _kbd_vp2_veh:
+                            _ks = current_speed if abs(current_speed) >= abs(opp_speed) else opp_speed
+                            _kstr = current_steer if abs(current_steer) >= abs(opp_steer) else opp_steer
+                            _apply_speed, _apply_steer = _ks, _kstr
+                        elif _ctrl_veh == _kbd_vp1_veh:
+                            _apply_speed, _apply_steer = current_speed, current_steer
+                        elif _ctrl_veh == _kbd_vp2_veh:
+                            _apply_speed, _apply_steer = opp_speed, opp_steer
+                        else:
+                            _apply_speed, _apply_steer = 0.0, 0.0
+                    else:
+                        _apply_speed, _apply_steer = current_speed, current_steer
                 else:  # ROS2 mode
                     if _ext is not None:
                         _apply_speed, _apply_steer = _ext["speed"], _ext["steer"]
@@ -2011,84 +2322,84 @@ def main():
                         # controller state so the display reflects the command applied
                         # by the vehicle's built-in ROS2 subscriber (if present).
                         _apply_speed, _apply_steer = _read_og_ctrl(_meta)
-                if iteration % max(1, app_freq // 10) == 0:
-                    _wall_elapsed = time.monotonic() - _rt_wall_start
-                    _rt_pct = (iteration * _rt_sim_dt / _wall_elapsed * 100.0) if _wall_elapsed > 0 else 100.0
-                    print(f"\r[{_mode}] ACTIVE: {_ctrl_veh} | Spd={_apply_speed:+.2f} m/s, Str={float(_apply_steer) * 57.2958:+.1f}° | RT={_rt_pct:.0f}%   ", end="", flush=True)
             else:
                 # Reroute subscriber/publisher topics on mode change (non-selected vehicle).
                 # Must happen BEFORE continue so TELEOP mode mutes external ROS2 commands.
                 if _pub_routed_mode.get(_ctrl_veh) != _mode:
                     _new_pub    = _meta["drive_topic"] if _mode == "KEYBOARD_CONTROL" else _meta["monitor_topic"]
-                    _new_sub    = _meta["muted_topic"]  if _mode == "KEYBOARD_CONTROL" else _meta["drive_topic"]
-                    _sub_active = (_mode == "ROS2_CONTROL")
+                    _new_sub    = _meta["muted_topic"]
+                    # Update guard unconditionally so rerouting never fires again even if
+                    # the og.Controller.set() calls below raise an exception.
+                    _pub_routed_mode[_ctrl_veh] = _mode
+                    if _mode == "ROS2_CONTROL":
+                        _just_switched_to_ros2 = True
                     try:
                         og.Controller.set(og.Controller.attribute(_meta["pub_topic_attr"]), _new_pub)
+                        # Always keep the subscriber tick disabled regardless of mode.
+                        # The physics loop drives the controller via og.Controller.set()
+                        # every tick from the _drive_cmds cache.  Enabling the subscriber
+                        # tick in ROS2 mode caused the SubscribeAckermannDrive node to
+                        # reset controller inputs to 0 on every tick without a new message
+                        # (i.e. 5 out of 6 ticks at 60 Hz when the controller sends at 10 Hz),
+                        # overriding og.Controller.set() authored values.
                         if _meta.get("sub_node_path"):
                             try:
-                                og.Controller.set(og.Controller.attribute(f"{_meta['sub_node_path']}.inputs:enabled"), _sub_active)
+                                og.Controller.set(og.Controller.attribute(f"{_meta['sub_node_path']}.inputs:enabled"), False)
                             except Exception: pass
                         if _meta.get("sub_tick_path"):
                             try:
-                                og.Controller.set(og.Controller.attribute(f"{_meta['sub_tick_path']}.inputs:enabled"), _sub_active)
+                                og.Controller.set(og.Controller.attribute(f"{_meta['sub_tick_path']}.inputs:enabled"), False)
                             except Exception: pass
-                        # Always keep subscriber→controller connections disconnected.
-                        # The SubscribeAckermannDrive node is event-driven: its outputs
-                        # reset to 0 on every tick without a new message, which overrides
-                        # og.Controller.set() authored values even when the tick is disabled.
-                        # The physics loop drives the controller via og.Controller.set()
-                        # every tick from the _drive_cmds cache, so the connection is never
-                        # needed and only causes the value/0 toggle at the publish frequency.
                         for _sc_src, _sc_dst in (_meta.get("sub_ctrl_connections") or []):
                             try:
                                 og.Controller.disconnect(og.Controller.attribute(_sc_src), og.Controller.attribute(_sc_dst))
                             except Exception: pass
                         if _meta.get("sub_topic_attr"):
                             og.Controller.set(og.Controller.attribute(_meta["sub_topic_attr"]), _new_sub)
-                        _pub_routed_mode[_ctrl_veh] = _mode
-                        if _mode == "ROS2_CONTROL":
-                            _just_switched_to_ros2 = True
                         print(f"\n[Control] {_ctrl_veh}: routed to {_mode}")
                     except Exception as _rr_e:
                         print(f"\n[Teleop] {_ctrl_veh}: failed to reroute: {_rr_e}")
                 if _mode == "KEYBOARD_CONTROL":
-                    # Non-selected vehicle in TELEOP: hold at 0.0.
-                    # We MUST still fall through to the try block so og.Controller.set()
-                    # is called every tick — this overrides the subscriber's ROS2 values
-                    # which persist on the controller when no set() is issued.
-                    _apply_speed, _apply_steer = 0.0, 0.0
+                    # Must fall through to og.Controller.set() every tick to override
+                    # any stale subscriber ROS2 values on the controller.
+                    if _ctrl_veh == _kbd_vp1_veh and _ctrl_veh == _kbd_vp2_veh:
+                        _ks = current_speed if abs(current_speed) >= abs(opp_speed) else opp_speed
+                        _kstr = current_steer if abs(current_steer) >= abs(opp_steer) else opp_steer
+                        _apply_speed, _apply_steer = _ks, _kstr
+                    elif _ctrl_veh == _kbd_vp1_veh:
+                        _apply_speed, _apply_steer = current_speed, current_steer
+                    elif _ctrl_veh == _kbd_vp2_veh:
+                        _apply_speed, _apply_steer = opp_speed, opp_steer
+                    else:
+                        _apply_speed, _apply_steer = 0.0, 0.0
                 elif _ext is not None:
                     _apply_speed, _apply_steer = _ext["speed"], _ext["steer"]
                 else:
                     _apply_speed, _apply_steer = _read_og_ctrl(_meta)
             _hud_cmds[_ctrl_veh] = (_apply_speed, _apply_steer)
 
-            # Reroute subscriber/publisher topics on mode change (selected vehicle path):
-            # TELEOP: disable subscriber + mute topic so external ROS2 can't override keyboard
-            # ROS2:   re-enable subscriber on drive_topic for external control
+            # Reroute publisher topic on mode change; subscriber always stays disabled.
             if _pub_routed_mode.get(_ctrl_veh) != _mode:
-                _new_pub    = _meta["drive_topic"] if _mode == "KEYBOARD_CONTROL" else _meta["monitor_topic"]
-                _new_sub    = _meta["muted_topic"]  if _mode == "KEYBOARD_CONTROL" else _meta["drive_topic"]
-                _sub_active = (_mode == "ROS2_CONTROL")
+                _new_pub = _meta["drive_topic"] if _mode == "KEYBOARD_CONTROL" else _meta["monitor_topic"]
+                # Update guard unconditionally so rerouting never fires again even if
+                # the og.Controller.set() calls below raise an exception.
+                _pub_routed_mode[_ctrl_veh] = _mode
+                if _mode == "ROS2_CONTROL":
+                    _just_switched_to_ros2 = True
                 try:
                     og.Controller.set(og.Controller.attribute(_meta["pub_topic_attr"]), _new_pub)
                     if _meta.get("sub_node_path"):
                         try:
-                            og.Controller.set(og.Controller.attribute(f"{_meta['sub_node_path']}.inputs:enabled"), _sub_active)
+                            og.Controller.set(og.Controller.attribute(f"{_meta['sub_node_path']}.inputs:enabled"), False)
                         except Exception: pass
                     if _meta.get("sub_tick_path"):
                         try:
-                            og.Controller.set(og.Controller.attribute(f"{_meta['sub_tick_path']}.inputs:enabled"), _sub_active)
+                            og.Controller.set(og.Controller.attribute(f"{_meta['sub_tick_path']}.inputs:enabled"), False)
                         except Exception: pass
                     for _sc_src, _sc_dst in (_meta.get("sub_ctrl_connections") or []):
                         try:
                             og.Controller.disconnect(og.Controller.attribute(_sc_src), og.Controller.attribute(_sc_dst))
                         except Exception: pass
-                    if _meta.get("sub_topic_attr"):
-                        og.Controller.set(og.Controller.attribute(_meta["sub_topic_attr"]), _new_sub)
-                    _pub_routed_mode[_ctrl_veh] = _mode
-                    if _mode == "ROS2_CONTROL":
-                        _just_switched_to_ros2 = True
                     print(f"\n[Control] {_ctrl_veh}: routed to {_mode}")
                 except Exception as _rr_e:
                     print(f"\n[Teleop] {_ctrl_veh}: failed to reroute: {_rr_e}")
@@ -2105,16 +2416,59 @@ def main():
                     # One-shot reset on mode switch: clear the latched keyboard command.
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_speed"]), 0.0)
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_steer"]), 0.0)
+                    _sub_np = _meta.get("sub_node_path")
+                    if _sub_np:
+                        try: og.Controller.set(og.Controller.attribute(f"{_sub_np}.outputs:speed"), 0.0)
+                        except Exception: pass
+                        try: og.Controller.set(og.Controller.attribute(f"{_sub_np}.outputs:steeringAngle"), 0.0)
+                        except Exception: pass
                 elif _ext is not None:
                     # ROS2 mode with a fresh command: apply it.
+                    # Write to the controller inputs (works when sub→ctrl connections
+                    # are absent or have been disconnected) AND to the subscriber's
+                    # output attributes (ensures any un-disconnected sub→ctrl
+                    # connections carry our values, since the subscriber tick is
+                    # disabled and its compute function won't overwrite them).
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_speed"]), _ext["speed"])
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_steer"]), _ext["steer"])
+                    _sub_np = _meta.get("sub_node_path")
+                    if _sub_np:
+                        try: og.Controller.set(og.Controller.attribute(f"{_sub_np}.outputs:speed"), float(_ext["speed"]))
+                        except Exception: pass
+                        try: og.Controller.set(og.Controller.attribute(f"{_sub_np}.outputs:steeringAngle"), float(_ext["steer"]))
+                        except Exception: pass
                 else:
-                    # ROS2 mode, no command received for >100 ms: safety stop.
+                    # ROS2 mode, no command received within ros2_cmd_timeout_s: safety stop.
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_speed"]), 0.0)
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_steer"]), 0.0)
+                    _sub_np = _meta.get("sub_node_path")
+                    if _sub_np:
+                        try: og.Controller.set(og.Controller.attribute(f"{_sub_np}.outputs:speed"), 0.0)
+                        except Exception: pass
+                        try: og.Controller.set(og.Controller.attribute(f"{_sub_np}.outputs:steeringAngle"), 0.0)
+                        except Exception: pass
             except Exception: pass
-            
+
+        # ── Terminal status: two in-place lines (ego + opponent) ──────────────
+        if iteration % max(1, app_freq // 10) == 0:
+            _wall_elapsed = time.monotonic() - _rt_wall_start
+            _rt_pct = (iteration * _rt_sim_dt / _wall_elapsed * 100.0) if _wall_elapsed > 0 else 100.0
+            _status_lines = []
+            for _sv, (_ss, _sstr) in _hud_cmds.items():
+                _smode = "KBD" if veh_ctrl_mode.get(_sv, "KEYBOARD_CONTROL") == "KEYBOARD_CONTROL" else "ROS"
+                _status_lines.append(
+                    f"[{_smode}] {_sv}: Spd={_ss:+.2f} m/s  Str={float(_sstr)*57.2958:+.1f}°"
+                )
+            if _status_lines:
+                _status_lines[-1] += f"  | RT={_rt_pct:.0f}%"
+            if _last_n_status_lines > 0 and _status_lines:
+                print(f"\033[{_last_n_status_lines}A", end="", flush=False)
+            for _sl in _status_lines:
+                print(f"\r{_sl:<70}", flush=False)
+            if _status_lines:
+                import sys; sys.stdout.flush()
+            _last_n_status_lines = len(_status_lines)
+
         # Follow Cameras (skipped in headless mode — no viewport)
         if not headless_mode:
          for veh_name, cfg in veh_follow_configs.items():
@@ -2191,6 +2545,48 @@ def main():
                     data["x_attr"] = x_attr
             except Exception: pass
 
+        # ── One-time UI setup (viewport camera, split-screen, panel hiding) ───
+        # Deferred until after the first follow-camera tick so USD camera prims exist.
+        if not headless_mode and not _ui_setup_done and follow_cam_handles:
+            _ui_setup_done = True
+            # Set ego follow camera as the default viewport camera
+            if "Ego_Vehicle" in veh_follow_configs:
+                _set_viewport_camera(f"/World/{veh_follow_configs['Ego_Vehicle']['cam_name']}")
+
+            # Split-screen: create Viewport 2 and point it at the opponent camera
+            if _ui_split_screen and len(enabled_vehicles) >= 2 and "Opponent_Vehicle" in veh_follow_configs:
+                try:
+                    from omni.kit.viewport.utility import create_viewport_window as _cvw
+                    import omni.ui as _ui2
+                    _vp2_win = _cvw("Viewport 2")
+                    if _vp2_win is not None:
+                        _dock_vp2_iteration = iteration + 2  # Dock 2 frames from now
+                        _opp_cam_p = f"/World/{veh_follow_configs['Opponent_Vehicle']['cam_name']}"
+                        if hasattr(_vp2_win, "viewport_api"):
+                            _vp2_api = _vp2_win.viewport_api
+                            _vp2_api.camera_path = _opp_cam_p
+                    print("[UI] Split-screen: Viewport 2 created for Opponent_Vehicle.")
+                except Exception as _vp2e:
+                    print(f"[UI] Split-screen setup error: {_vp2e}")
+
+            _rviz_reset()
+
+        if _ui_split_screen and _dock_vp2_iteration > 0 and iteration >= _dock_vp2_iteration:
+            try:
+                import omni.ui as _ui2
+                _vp_win = _ui2.Workspace.get_window("Viewport")
+                _vp2_win_o = _ui2.Workspace.get_window("Viewport 2")
+                if _vp_win and _vp2_win_o:
+                    _vp2_win_o.dock_in(_vp_win, _ui2.DockPosition.RIGHT, 0.5)
+                    print(f"[UI] Split-screen: Viewport 2 docked successfully at iter {iteration}.")
+                    _dock_vp2_iteration = -1  # Success, stop trying
+                elif iteration > _dock_vp2_iteration + 60:
+                    print("[UI] Split-screen: Viewport dock timeout (windows not found).")
+                    _dock_vp2_iteration = -1  # Timeout
+            except Exception as e:
+                print(f"[UI] Split-screen dock setup error: {e}")
+                _dock_vp2_iteration = -1
+
         # ── GNSS Publish ──────────────────────────────────────────────────────
         # Runs at _gnss_frame_skip intervals (e.g. every 12 frames at 120 Hz → 10 Hz).
         # Reads the chassis world transform, applies equirectangular projection from
@@ -2234,53 +2630,107 @@ def main():
 
         # Update HUD
         if iteration % 4 == 0 and HUD_ENABLED:
-            for v_name, v_models in hud_labels.items():
-                s_meta = vehicle_sensor_nodes.get(v_name, {})
-                # Control source badge reflects the explicit per-vehicle mode (F1/F2 toggle)
-                _cs = "CONTROL: ROS2" if veh_ctrl_mode.get(v_name, "KEYBOARD_CONTROL") == "ROS2_CONTROL" else "CONTROL: KEYBOARD"
-                if "ctrl_src" in v_models:
-                    v_models["ctrl_src"].text = _cs
-                    v_models["ctrl_src"].style = {
-                        "color": 0xFFFFFFFF,
-                        "font_size": FONT_ROW, "font_style": "Bold",
-                    }
-                # Show actual applied command per vehicle.
-                # In TELEOP mode this is the keyboard command; in ROS2 mode it is
-                # the last received external command (or 0,0 if stale/absent).
-                _cmd = _hud_cmds.get(v_name, (0.0, 0.0))
-                v_models["speed"].text = f"{_cmd[0]:+.2f} m/s"
-                v_models["steer"].text = f"{float(_cmd[1]) * 57.2958:+.2f}°"
-                    
-                odom_p = s_meta.get("odom_path")
-                if odom_p:
-                    try:
-                        pos = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:position"))
-                        lv  = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:linearVelocity"))
-                        av  = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:angularVelocity"))
-                        if pos is not None:
-                            v_models["pos_x"].text = f"{pos[0]:+.3f} m"
-                            v_models["pos_y"].text = f"{pos[1]:+.3f} m"
-                            v_models["pos_z"].text = f"{pos[2]:+.3f} m"
-                        if lv is not None:
-                            v_models["lin_vel"].text = f"{lv[0]:+.2f} m/s"
-                        if av is not None:
-                            v_models["ang_vel"].text = f"{av[2]:+.2f} r/s"
-                    except Exception: pass
-                imu_p = s_meta.get("imu_path")
-                if imu_p:
-                    try:
-                        la     = og.Controller.get(og.Controller.attribute(imu_p + ".outputs:linAcc"))
-                        av_imu = og.Controller.get(og.Controller.attribute(imu_p + ".outputs:angVel"))
-                        if la is not None:
-                            v_models["lin_acc"].text = f"{la[0]:+.2f} m/s²"
-                        if av_imu is not None:
-                            v_models["ang_acc"].text = f"{av_imu[2]:+.2f} r/s"
-                    except Exception: pass
-                if "gnss_lat" in v_models:
-                    _gd = _gnss_hud_data.get(v_name)
-                    if _gd is not None:
-                        v_models["gnss_lat"].text = f"{_gd[0]:.6f}°"
-                        v_models["gnss_lon"].text = f"{_gd[1]:.6f}°"
+            if _split_active and opp_hud_window is not None:
+                # VP1's HUD always sits on VP1; VP2's HUD always sits on VP2.
+                try:
+                    import omni.ui as _ui_hud
+                    _vp1_ui = _ui_hud.Workspace.get_window("Viewport")
+                    _vp2_ui = _ui_hud.Workspace.get_window("Viewport 2")
+                    if _vp1_ui and _vp2_ui:
+                        hud_window.position_x     = _vp1_ui.position_x + 10
+                        opp_hud_window.position_x = _vp2_ui.position_x + 10
+                except Exception:
+                    pass
+                # Each HUD window shows the vehicle currently in that viewport.
+                # hud_labels["Ego_Vehicle"] contains the widgets for hud_window (VP1).
+                # hud_labels["Opponent_Vehicle"] contains the widgets for opp_hud_window (VP2).
+                for _hud_veh, v_models in [
+                    (_vp1_showing, hud_labels.get("Ego_Vehicle", {})),
+                    (_vp2_showing, hud_labels.get("Opponent_Vehicle", {})),
+                ]:
+                    if not v_models:
+                        continue
+                    s_meta = vehicle_sensor_nodes.get(_hud_veh, {})
+                    if "header" in v_models:
+                        v_models["header"].text = _hud_veh.replace("_", " ")
+                        v_models["header"].style = {"color": C_WHITE, "font_size": FONT_HEADER, "font_style": "Bold"}
+                    _cs = "CONTROL: ROS2" if veh_ctrl_mode.get(_hud_veh, "KEYBOARD_CONTROL") == "ROS2_CONTROL" else "CONTROL: KEYBOARD"
+                    if "ctrl_src" in v_models:
+                        v_models["ctrl_src"].text = _cs
+                        v_models["ctrl_src"].style = {"color": 0xFFFFFFFF, "font_size": FONT_ROW, "font_style": "Bold"}
+                    _cmd = _hud_cmds.get(_hud_veh, (0.0, 0.0))
+                    v_models["speed"].text = f"{_cmd[0]:+.2f} m/s"
+                    v_models["steer"].text = f"{float(_cmd[1]) * 57.2958:+.2f}°"
+                    odom_p = s_meta.get("odom_path")
+                    if odom_p:
+                        try:
+                            pos = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:position"))
+                            lv  = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:linearVelocity"))
+                            av  = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:angularVelocity"))
+                            if pos is not None:
+                                v_models["pos_x"].text = f"{pos[0]:+.3f} m"
+                                v_models["pos_y"].text = f"{pos[1]:+.3f} m"
+                                v_models["pos_z"].text = f"{pos[2]:+.3f} m"
+                            if lv is not None:
+                                v_models["lin_vel"].text = f"{lv[0]:+.2f} m/s"
+                            if av is not None:
+                                v_models["ang_vel"].text = f"{av[2]:+.2f} r/s"
+                        except Exception: pass
+                    imu_p = s_meta.get("imu_path")
+                    if imu_p:
+                        try:
+                            la     = og.Controller.get(og.Controller.attribute(imu_p + ".outputs:linAcc"))
+                            av_imu = og.Controller.get(og.Controller.attribute(imu_p + ".outputs:angVel"))
+                            if la is not None:
+                                v_models["lin_acc"].text = f"{la[0]:+.2f} m/s²"
+                            if av_imu is not None:
+                                v_models["ang_acc"].text = f"{av_imu[2]:+.2f} r/s"
+                        except Exception: pass
+                    if "gnss_lat" in v_models:
+                        _gd = _gnss_hud_data.get(_hud_veh)
+                        if _gd is not None:
+                            v_models["gnss_lat"].text = f"{_gd[0]:.6f}°"
+                            v_models["gnss_lon"].text = f"{_gd[1]:.6f}°"
+            else:
+                for v_name, v_models in hud_labels.items():
+                    s_meta = vehicle_sensor_nodes.get(v_name, {})
+                    _cs = "CONTROL: ROS2" if veh_ctrl_mode.get(v_name, "KEYBOARD_CONTROL") == "ROS2_CONTROL" else "CONTROL: KEYBOARD"
+                    if "ctrl_src" in v_models:
+                        v_models["ctrl_src"].text = _cs
+                        v_models["ctrl_src"].style = {"color": 0xFFFFFFFF, "font_size": FONT_ROW, "font_style": "Bold"}
+                    _cmd = _hud_cmds.get(v_name, (0.0, 0.0))
+                    v_models["speed"].text = f"{_cmd[0]:+.2f} m/s"
+                    v_models["steer"].text = f"{float(_cmd[1]) * 57.2958:+.2f}°"
+                    odom_p = s_meta.get("odom_path")
+                    if odom_p:
+                        try:
+                            pos = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:position"))
+                            lv  = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:linearVelocity"))
+                            av  = og.Controller.get(og.Controller.attribute(odom_p + ".outputs:angularVelocity"))
+                            if pos is not None:
+                                v_models["pos_x"].text = f"{pos[0]:+.3f} m"
+                                v_models["pos_y"].text = f"{pos[1]:+.3f} m"
+                                v_models["pos_z"].text = f"{pos[2]:+.3f} m"
+                            if lv is not None:
+                                v_models["lin_vel"].text = f"{lv[0]:+.2f} m/s"
+                            if av is not None:
+                                v_models["ang_vel"].text = f"{av[2]:+.2f} r/s"
+                        except Exception: pass
+                    imu_p = s_meta.get("imu_path")
+                    if imu_p:
+                        try:
+                            la     = og.Controller.get(og.Controller.attribute(imu_p + ".outputs:linAcc"))
+                            av_imu = og.Controller.get(og.Controller.attribute(imu_p + ".outputs:angVel"))
+                            if la is not None:
+                                v_models["lin_acc"].text = f"{la[0]:+.2f} m/s²"
+                            if av_imu is not None:
+                                v_models["ang_acc"].text = f"{av_imu[2]:+.2f} r/s"
+                        except Exception: pass
+                    if "gnss_lat" in v_models:
+                        _gd = _gnss_hud_data.get(v_name)
+                        if _gd is not None:
+                            v_models["gnss_lat"].text = f"{_gd[0]:.6f}°"
+                            v_models["gnss_lon"].text = f"{_gd[1]:.6f}°"
 
         # ── Segmentation Capture ──────────────────────────────────────────────
         if is_recording and seg_enabled and seg_rgb_annot and seg_mask_annot:

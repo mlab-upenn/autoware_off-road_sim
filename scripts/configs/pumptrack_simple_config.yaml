@@ -1,32 +1,34 @@
-environment:
-  asset: "assets/environments/pumptrack_simple.usd"
-  scale: [0.01, 0.01, 0.01]
-  rotation_euler: [90.0, 0.0, -90.0]
-  translation: [0.0, 0.0, 0.0]
-
 physics_settings:
-  time_steps_per_second: 55             # Physics tick rate (Hz)
+  time_steps_per_second: 60             # Physics tick rate (Hz)
   solver_position_iterations: 8         # Per-articulation position iterations (default 16; 4 stable for RC car)
   solver_velocity_iterations: 2         # Per-articulation velocity iterations (default 4)
 
-viewport_settings:
-  render_resolution: [2560, 1440]       # [2560, 1440]
+graphics_settings:
+  render_resolution: [2560, 1440]       # [3840, 2160] / [2560, 1440] / [1920, 1080] / [1280, 720]
   enable_DLSS_FPS_Multiplier_x2: false  # Automatically enable DLSS FPS_Multiplier x2
   disable_shadows: false                # Skip shadow map rendering (large GPU win)
   disable_ambient_occlusion: true       # Skip screen-space AO
   disable_reflections: true             # Skip RTX reflections
 
-keyboard_control_settings:
-  max_speed_m_s: 6.0
-  max_steer_rad: 0.4
-  acceleration_m_s2: 10.0
-  deceleration_m_s2: 10.0
-  steering_speed_rad_s: 3.0
+user_interface:
+  viewport_mode: true                   # Hide all Isaac Sim panels except the viewport
+  split_screen: true                   # Show two side-by-side viewports when both vehicles are enabled
 
-follow_camera:  
-  distance: 4.5     # Distance behind the vehicle (meters)
-  height: 1.5       # Camera height above ground (meters)
-  focus_height: 0.8 # Look-at target height on the vehicle (meters)
+map_server:
+  enabled: true
+  resolution: 0.05                      # meters per cell
+
+network_setup:
+  ros2_domain_id: 0
+  network_interface: "auto"             # "auto" = CycloneDDS multicast on all interfaces;
+                                        # set to "eth0" or "192.168.x.x" to pin a specific NIC
+  ros2_cmd_timeout_s: 3.0               # Safety stop if no drive command received within this window.
+
+environment:
+  asset: "assets/environments/pumptrack_simple.usd"
+  scale: [0.01, 0.01, 0.01]
+  rotation_euler: [90.0, 0.0, -90.0]
+  translation: [0.0, 0.0, 0.0]
 
 vehicles:
   - name: "Ego_Vehicle"
@@ -45,9 +47,9 @@ vehicles:
     topic_prefix: "/opponent"
     spawn_position: [-2.0, 0.0, 0.0]
     spawn_orientation: [0.0, 0.0, -90.0]
-    enable_camera: false
-    enable_lidar: false
-    enable_gnss: false
+    enable_camera: true
+    enable_lidar: true
+    enable_gnss: true
 
 # These are the hardcoded topic names baked into the USD.
 # launch_sim.py will remap them to /{topic_prefix}/{topic} for each vehicle.
@@ -62,36 +64,39 @@ topics_to_remap:
   - "/point_cloud"
   - "/rgb"
 
+keyboard_control_settings:
+  max_speed_m_s: 6.0
+  max_steer_rad: 0.4
+  acceleration_m_s2: 10.0
+  deceleration_m_s2: 10.0
+  steering_speed_rad_s: 3.0
+
+follow_camera:  
+  distance: 4.5     # Distance behind the vehicle (meters)
+  height: 1.5       # Camera height above ground (meters)
+  focus_height: 0.8 # Look-at target height on the vehicle (meters)
+
 gnss:
   enabled: true
   publish_rate_hz: 10
   # GPS coordinate of the simulation world origin (0, 0, 0).
   # Sim X axis points East; sim Y axis points North.
   map_origin:
-    latitude: 39.984699     # degrees, positive = North
-    longitude: -75.226020   # degrees, positive = East
-    altitude: 0.0           # metres above WGS-84 ellipsoid
+    latitude: 39.984699        # degrees, positive = North
+    longitude: -75.226020      # degrees, positive = East
+    altitude: 0.0              # metres above WGS-84 ellipsoid
   noise:
     horizontal_stddev_m: 0.5   # 1-sigma horizontal error (East & North)
     altitude_stddev_m: 1.0     # 1-sigma vertical error
 
-map_server:
-  enabled: true
-  resolution: 0.05       # meters per cell
-
-network_setup:
-  ros2_domain_id: 0
-  network_interface: "auto"   # "auto" = CycloneDDS multicast on all interfaces;
-                               # set to "eth0" or "192.168.x.x" to pin a specific NIC
-
 semantic_segmentation:
   id_keywords:
-    0: ["default"]       # non-drivable
-    1: ["track"]         # drivable
+    0: ["default"]             # non-drivable
+    1: ["track"]               # drivable
   color_map:
-    0: [61, 93, 255]     # non-drivable  -> blue
-    1: [0, 255, 220]     # drivable      -> Cyan
-  capture_frequency: 4   # Hz → every (60Hz / 4Hz) = 15 frames
+    0: [61, 93, 255]           # non-drivable  -> blue
+    1: [0, 255, 220]           # drivable      -> Cyan
+  capture_frequency: 4         # Hz → every (60Hz / 4Hz) = 15 frames
   image_resolution: [1280, 720]
   images_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/images"
   gt_masks_dir: "data/segmentation/pumptrack_simple/pumptrack_simple/gt_masks"

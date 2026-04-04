@@ -35,6 +35,19 @@ from rclpy.node import Node
 rclpy.init()
 _node = Node("isaacsim_drive_bridge")
 
+# Keep the tf2 buffer to 2 s (default is 10 s).
+# Must stay below the set_current_time offset used on restart (3.0 s in
+# launch_sim.py) so that when the sim clock jumps forward by 3 s all old TF
+# entries (at most 2 s old) are immediately evicted, giving Rviz clean TF
+# data from the very first physics tick with no TF_OLD_DATA blackout.
+try:
+    from tf2_ros import Buffer as _TF2Buffer, TransformListener as _TFListener
+    from rclpy.duration import Duration as _Duration
+    _tf_buffer   = _TF2Buffer(cache_time=_Duration(seconds=2.0))
+    _tf_listener = _TFListener(_tf_buffer, _node)
+except Exception as _e:
+    sys.stderr.write(f"[drive_bridge] tf2 buffer init skipped: {_e}\n")
+
 _pending_subs = []   # list of (veh_name, drive_topic, control_topic)
 _pending_maps = []   # list of raw parts [width, height, res, ox, oy, b64]
 _pending_tfs  = []   # list of (parent_frame, child_frame)
