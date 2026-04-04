@@ -6,6 +6,8 @@ The Autoware-RoboRacer Off-road Simulator is a multi-vehicle high-fidelity simul
 
 The simulator features a **1/5th-scale RoboRacer-Max** model equipped with a comprehensive sensor suite: **3D LiDAR**, **RGB camera**, **GNSS**, **IMU**, and **odometry**. It includes a high-fidelity **pumptrack_simple** environment, featuring non-planar terrain specifically designed for challenging off-road testing. The framework facilitates **multi-vehicle configurations** via a versatile control interface that detects incoming **Autoware** and **RoboRacer** control message types, while supporting seamless **Hardware-in-the-Loop (HIL) testing** via CycloneDDS. Additional tools include a **semantic segmentation recorder** for perception training, built-in **keyboard teleoperation** for manual control, and an optimized launch and config system that is easy to use and ensures a perfect balance between simulation fidelity and real-time performance.
 
+To refer to full Isaac Sim documentation, visit [Isaac Sim Documentation](https://docs.isaacsim.omniverse.nvidia.com/6.0.0/index.html).
+
 ---
 
 ## Table of Contents
@@ -102,7 +104,7 @@ The launch script will:
 
 ## Headless Mode
 
-Add `--headless` to run the simulator without a display window. This is useful for **Hardware-in-the-Loop testing**, **CI pipelines**, and **remote/server deployments** where no monitor is attached.
+Add `--headless` to run the simulator without a display window. This is useful for **Distributed mode and Hardware-in-the-Loop testing**, **CI pipelines**, and **remote/server deployments** where no monitor is attached.
 
 ```bash
 /root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py \
@@ -113,9 +115,6 @@ Add `--headless` to run the simulator without a display window. This is useful f
 
 | Feature | Normal | Headless |
 |---|---|---|
-| Display window | Yes | No |
-| Viewport HUD | Yes | Skipped |
-| Follow cameras | Yes | Skipped |
 | Default control mode | `KEYBOARD_CONTROL` | `ROS2_CONTROL` (all vehicles) |
 | Keyboard control | Available (hold `1`/`2` to toggle) | Not available |
 
@@ -139,18 +138,33 @@ All sensors (`/ego/imu`, `/ego/odom`, `/ego/point_cloud`, `/ego/gnss`, etc.) con
 
 ## Attach a New Terminal to a Running Container
 
+To attach a new terminal to a running container for RViz, ROS 2 commands, etc:
+
 Outside the container at the **autoware_off-road_sim** directory:
+
 ```bash
 ./docker/attach.sh
 ```
 
-This automatically sources the ROS 2 Humble environment and sets the working directory to `/workspace/autoware_off-road_sim`. Use the terminal for RViz, ros2 commands, etc.
+This automatically sources the ROS 2 Humble environment and sets the working directory to `/workspace/autoware_off-road_sim`.
+
+---
+
+## Launch Isaac Sim Natively with Full UI
+
+When editing USD files, it is preferable to launch Isaac Sim without using the launch file.
+
+Inside the container:
+
+```bash
+/root/isaacsim/_build/linux-x86_64/release/isaac-sim.sh
+```
 
 ---
 
 ## Keyboard Control
 
-**Click inside the Isaac Sim viewport** to give it keyboard focus after launch.
+**Click inside the Isaac Sim viewport** to give it focus after launch.
 
 | Key | Action |
 |---|---|
@@ -278,16 +292,16 @@ At startup, `launch_sim.py` spawns a Python 3.10 subprocess (`isaacsim_drive_bri
 - **KEYBOARD_CONTROL mode** — keyboard input is applied; ROS 2 commands are ignored
 - **ROS2_CONTROL mode** — ROS 2 commands are applied; keyboard input is ignored
 
-The active control source is shown in the terminal status line:
-```
-[ACKERMANN]        ACTIVE: Ego_Vehicle | Spd=+3.20 m/s, Str=-8.6°
-[AUTOWARE]         ACTIVE: Ego_Vehicle | Spd=+5.00 m/s, Str=+4.6°
-[KEYBOARD_CONTROL] ACTIVE: Ego_Vehicle | Spd=+0.00 m/s, Str=+0.0°
-```
-
 ### Step 1 — Switch vehicle to ROS2_CONTROL mode
 
 Click inside the Isaac Sim viewport, then hold `1` (Ego) or `2` (Opponent) for ≥1 second until the HUD shows `CONTROL:KEYBOARD` -> `CONTROL:ROS2`.
+
+The active control source is shown in the terminal status line:
+```
+[KBD] Ego_Vehicle: Spd=+0.00 m/s  Str=+0.0°  | RT=88%
+[Control] Ego_Vehicle → ROS2_CONTROL
+[ROS] Ego_Vehicle: Spd=+0.00 m/s  Str=+0.0°  | RT=89%
+```
 
 ### Step 2 — Publishing an Autoware or RoboRacer control command
 
@@ -335,9 +349,9 @@ vehicles:
     enable_gnss: true
 ```
 
-### Hardware-in-the-Loop (HIL) Testing
+### Distributed Mode and Hardware-in-the-Loop (HIL) Testing
 
-This setup connects a remote **PC** or **Jetson** running the **Autoware** or **RoboRacer** autonomy stack to the Isaac Sim environment running on the **simulation PC** over a **LAN or WiFi** network.
+This setup connects a remote **PC** or **Jetson** running the **Autoware** or **RoboRacer** autonomy stack to the Isaac Sim environment running on the **simulation PC** over a **LAN or WiFi** network. This allows the autonomy stack to run on a different machine than the simulation environment, saving the simulation PC's resources for simulation.
 
 > **WiFi note:** WiFi is supported but introduces variable latency. Use a dedicated 5 GHz access point, or prefer wired Ethernet for high-frequency sensor streams (LiDAR, camera).
 
@@ -488,7 +502,7 @@ The simulator prints a real-time factor (`RT=X%`) in the terminal status line. `
 [KEYBOARD_CONTROL] ACTIVE: Ego_Vehicle | Spd=+0.00 m/s, Str=+0.0° | RT=97%
 ```
 
-All tuning knobs are in the `physics_settings` and `viewport_settings` blocks of the config file.
+All tuning knobs are in the `physics_settings` and `graphics_settings` blocks of the config file.
 
 ---
 
@@ -547,10 +561,10 @@ Controls how many passes PhysX uses to resolve friction, restitution, and veloci
 
 ---
 
-### Viewport Settings
+### Graphics Settings
 
 ```yaml
-viewport_settings:
+graphics_settings:
   render_resolution: [2560, 1440]
   enable_DLSS_FPS_Multiplier_x2: false
   disable_shadows: false
