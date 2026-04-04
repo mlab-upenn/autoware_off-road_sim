@@ -15,17 +15,15 @@ To refer to full Isaac Sim documentation, visit [Isaac Sim Documentation](https:
 1. [Prerequisites](#prerequisites)
 2. [Docker Setup](#docker-setup)
 3. [Running the Simulation](#running-the-simulation)
-4. [Headless Mode](#headless-mode)
-5. [Attach a New Terminal to a Running Container](#attach-a-new-terminal-to-a-running-container)
-6. [Keyboard Control](#keyboard-control)
-7. [User Interface](#user-interface)
-8. [ROS 2 Topics](#ros-2-topics)
-9. [Control Interface](#control-interface)
-10. [Multi-Vehicle Setup](#multi-vehicle-setup)
-11. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
-12. [Performance Tuning](#performance-tuning)
-13. [Utility Scripts](#utility-scripts)
-14. [Troubleshooting](#troubleshooting)
+4. [Keyboard Control](#keyboard-control)
+5. [User Interface](#user-interface)
+6. [ROS 2 Topics](#ros-2-topics)
+7. [Control Interface](#control-interface)
+8. [Multi-Vehicle Setup](#multi-vehicle-setup)
+9. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
+10. [Performance Tuning](#performance-tuning)
+11. [Utility Scripts](#utility-scripts)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -100,9 +98,7 @@ The launch script will:
 4. Start the ROS 2 bridge
 5. Inject keyboard control via the ActionGraph
 
----
-
-## Headless Mode
+### Headless Mode
 
 Add `--headless` to run the simulator without a display window. This is useful for **Distributed mode and Hardware-in-the-Loop testing**, **CI pipelines**, and **remote/server deployments** where no monitor is attached.
 
@@ -134,9 +130,7 @@ ros2 topic pub --rate 15 /ego/control autoware_control_msgs/msg/Control \
 
 All sensors (`/ego/imu`, `/ego/odom`, `/ego/point_cloud`, `/ego/gnss`, etc.) continue to publish normally.
 
----
-
-## Attach a New Terminal to a Running Container
+### Attach a New Terminal to a Running Container
 
 To attach a new terminal to a running container for RViz, ROS 2 commands, etc:
 
@@ -148,9 +142,7 @@ Outside the container at the **autoware_off-road_sim** directory:
 
 This automatically sources the ROS 2 Humble environment and sets the working directory to `/workspace/autoware_off-road_sim`.
 
----
-
-## Launch Isaac Sim Natively with Full UI
+### Launch Isaac Sim Natively with Full UI
 
 When editing USD files, it is preferable to launch Isaac Sim without using the launch file.
 
