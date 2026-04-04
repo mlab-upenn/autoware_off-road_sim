@@ -14,15 +14,16 @@ The simulator features a **1/5th-scale RoboRacer-Max** model equipped with a com
 2. [Docker Setup](#docker-setup)
 3. [Running the Simulation](#running-the-simulation)
 4. [Headless Mode](#headless-mode)
-5. [Keyboard Control](#keyboard-control)
-6. [ROS 2 Topics](#ros-2-topics)
-7. [Control Interface](#control-interface)
-8. [Multi-Vehicle Setup](#multi-vehicle-setup)
-9. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
-10. [Performance Tuning](#performance-tuning)
-11. [Viewport & Rendering Tips](#viewport--rendering-tips)
-12. [Utility Scripts](#utility-scripts)
-13. [Troubleshooting](#troubleshooting)
+5. [Attach a New Terminal to a Running Container](#attach-a-new-terminal-to-a-running-container)
+6. [Keyboard Control](#keyboard-control)
+7. [User Interface](#user-interface)
+8. [ROS 2 Topics](#ros-2-topics)
+9. [Control Interface](#control-interface)
+10. [Multi-Vehicle Setup](#multi-vehicle-setup)
+11. [Semantic Segmentation Dataset Recording](#semantic-segmentation-dataset-recording)
+12. [Performance Tuning](#performance-tuning)
+13. [Utility Scripts](#utility-scripts)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -204,15 +205,15 @@ The terminal prints two in-place updating lines (one per vehicle) showing the ac
 
 When `split_screen: true` is set in the config and both vehicles are enabled, Isaac Sim opens two side-by-side viewports:
 
-| Viewport | Shows | HUD |
-|---|---|---|
-| Left | Ego Vehicle | Ego telemetry card |
-| Right | Opponent Vehicle | Opponent telemetry card |
+| Viewport | Shows |
+|---|---|
+| Left | Ego Vehicle |
+| Right | Opponent Vehicle |
 
 In split-screen mode:
 - **Both HUD headers are always white**: neither is highlighted blue, since both vehicles are visible simultaneously.
 - **WASD** controls the vehicle shown in the **left** viewport; **arrow keys** control the **right** viewport.
-- Click on the **left** or **right** viewport to give it focus. Press key `1` / `2` to switch vehicle of the selected viewport.
+- Click on the **left** or **right** viewport to give it focus. Press key `1` / `2` to switch vehicle between Ego or Opponent for the selected viewport.
 - Keys `1` / `2` can still be held to toggle each vehicle's control mode independently.
 - Press `~` returns to the free perspective camera.
 
