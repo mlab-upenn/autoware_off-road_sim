@@ -87,9 +87,9 @@ Example: To run RoboRacer-Max on pumptrack_simple demo
 /root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config scripts/configs/pumptrack_simple_config.yaml
 ```
 
-**Note:** Shader compilation takes several minutes on first launch. Isaac Sim can feel unresponsive during this time.
+> **Note:** Shader compilation takes several minutes on first launch. Isaac Sim can feel unresponsive during this time.
 
-**Note:** There are two `[Error] [omni.physicsschema.plugin] Joint body relationship points to a non existent prim, joint will not be created.` messages at launch. These errors do not affect the simulation and can be ignored for now.
+> **Note:** There are two `[Error] [omni.physicsschema.plugin] Joint body relationship points to a non existent prim, joint will not be created.` messages at launch. These errors do not affect the simulation and can be ignored for now.
 
 The launch script will:
 1. Load the environment USD asset
