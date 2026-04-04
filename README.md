@@ -211,8 +211,7 @@ When `split_screen: true` is set in the config and both vehicles are enabled, Is
 | Right | Opponent Vehicle |
 
 In split-screen mode:
-- **Both HUD headers are always white**: neither is highlighted blue, since both vehicles are visible simultaneously.
-- **WASD** controls the vehicle shown in the **left** viewport; **arrow keys** control the **right** viewport.
+- **WASD keys** control the vehicle shown in the **left** viewport; **arrow keys** control the **right** viewport.
 - Click on the **left** or **right** viewport to give it focus. Press key `1` / `2` to switch vehicle between Ego or Opponent for the selected viewport.
 - Keys `1` / `2` can still be held to toggle each vehicle's control mode independently.
 - Press `~` returns to the free perspective camera.
