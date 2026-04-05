@@ -76,15 +76,18 @@ This automatically:
 
 Always use the custom Python interpreter bundled with Isaac Sim — standard `python3` does not have the `omni.*` packages.
 
-Inside the container:
+To run the RoboRacer-Max on pumptrack_simple environment demo, inside the container:
 
-    /root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config <path-to-config>
-
-Configuration files are located in the `scripts/configs` directory. 
-
-Example: To run RoboRacer-Max on pumptrack_simple demo
 ```bash
-/root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config scripts/configs/pumptrack_simple_config.yaml
+/root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py 
+```
+
+This will run the simulation with the default configuration file: `scripts/configs/pumptrack_simple_config.yaml`.
+
+To run with a different configuration file, use the `--config` flag:
+
+```bash
+/root/isaacsim/_build/linux-x86_64/release/python.sh scripts/launch_sim.py --config <path-to-config>
 ```
 
 > **Note:** Shader compilation takes several minutes on first launch. Isaac Sim can feel unresponsive during this time.

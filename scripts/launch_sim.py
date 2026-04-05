@@ -14,7 +14,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default=os.path.join(os.path.dirname(__file__), "configs", "simulation_config.yaml"),
+        default=os.path.join(os.path.dirname(__file__), "configs", "pumptrack_simple_config.yaml"),
         help="Path to configuration file"
     )
     parser.add_argument(
