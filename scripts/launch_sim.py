@@ -2417,9 +2417,6 @@ def main():
                     # TELEOP: drive the controller from keyboard and publish for observability.
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_speed"]), _apply_speed)
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_steer"]), _apply_steer)
-                    _pub_p = _meta["pub_node_path"]
-                    og.Controller.set(og.Controller.attribute(f"{_pub_p}.inputs:speed"), _apply_speed)
-                    og.Controller.set(og.Controller.attribute(f"{_pub_p}.inputs:steeringAngle"), _apply_steer)
                 elif _just_switched_to_ros2:
                     # One-shot reset on mode switch: clear the latched keyboard command.
                     og.Controller.set(og.Controller.attribute(_meta["ctrl_attr_speed"]), 0.0)
@@ -2455,7 +2452,14 @@ def main():
                         except Exception: pass
                         try: og.Controller.set(og.Controller.attribute(f"{_sub_np}.outputs:steeringAngle"), 0.0)
                         except Exception: pass
+                
+                # Unconditionally sync the observability publisher node with the current physical actuals
+                # to prevent an untethered OmniGraph node from repeatedly blasting 0.0 into the ROS2 topic
+                _pub_p = _meta["pub_node_path"]
+                og.Controller.set(og.Controller.attribute(f"{_pub_p}.inputs:speed"), float(_apply_speed))
+                og.Controller.set(og.Controller.attribute(f"{_pub_p}.inputs:steeringAngle"), float(_apply_steer))
             except Exception: pass
+
 
         # ── Terminal status: two in-place lines (ego + opponent) ──────────────
         if iteration % max(1, app_freq // 10) == 0:
