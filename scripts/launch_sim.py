@@ -1936,8 +1936,10 @@ def main():
     _soft_restart_time = 0.0  # sim clock value at the moment of last restart trigger
     _ui_setup_done = False    # One-time viewport/panel setup after first follow-cam init
     _dock_vp2_iteration = -1  # Defers viewport docking by a few frames to ensure UI readiness
-    _rt_wall_start = time.monotonic()
     _rt_sim_dt = 1.0 / float(app_freq)  # simulated seconds per tick
+    _rt_wall_last = time.monotonic()   # wall time at last RT% sample (interval-based)
+    _rt_iter_last = 0                  # iteration count at last RT% sample
+    _ctrl_mode_last_pub = 0.0  # wall-clock time of last periodic control_mode publish
 
     if headless_mode:
         _veh_names = list(veh_ctrl_mode.keys())
@@ -1954,6 +1956,18 @@ def main():
     while simulation_app.is_running():
         simulation_app.update()
         iteration += 1
+
+        # Publish control_mode status at 10 Hz (every 100 ms).
+        _now_wall = time.monotonic()
+        if _ros_bridge_enabled and _drive_proc is not None and (_now_wall - _ctrl_mode_last_pub) >= 0.1:
+            try:
+                for _ivn, _imode in veh_ctrl_mode.items():
+                    _ival = 1 if _imode == "ROS2_CONTROL" else 0
+                    _drive_proc.stdin.write(f"ctrl_mode\t{_ivn}\t{_ival}\n")
+                _drive_proc.stdin.flush()
+                _ctrl_mode_last_pub = _now_wall
+            except Exception:
+                pass
 
         # Deferred restart: play is called the frame *after* stop so that PhysX tensor
         # views (odometry / IMU getVelocities) have fully torn down before OmniGraph
@@ -1991,6 +2005,9 @@ def main():
                             daemon=True).start()
                         for _pc in _drv_post_cmds:
                             _drive_proc.stdin.write(_pc)
+                        for _rvn, _rmode in veh_ctrl_mode.items():
+                            _rval = 1 if _rmode == "ROS2_CONTROL" else 0
+                            _drive_proc.stdin.write(f"ctrl_mode\t{_rvn}\t{_rval}\n")
                         _drive_proc.stdin.flush()
                         print("[ROS2 Bridge] Drive bridge restarted.")
                     else:
@@ -2028,7 +2045,8 @@ def main():
             timeline.play()
             _restart_pending = False
             iteration = 0
-            _rt_wall_start = time.monotonic()
+            _rt_wall_last = time.monotonic()
+            _rt_iter_last = 0
             _last_n_status_lines = 0
             print("[Sim] Simulation restarted.")
             continue
@@ -2104,6 +2122,12 @@ def main():
                         veh_ctrl_mode["Ego_Vehicle"] = _new
                         print(f"\n[Control] Ego_Vehicle → {_new}")
                         key1_toggle_fired = True
+                        if _ros_bridge_enabled and _drive_proc is not None:
+                            try:
+                                _drive_proc.stdin.write(f"ctrl_mode\tEgo_Vehicle\t{1 if _new == 'ROS2_CONTROL' else 0}\n")
+                                _drive_proc.stdin.flush()
+                            except Exception:
+                                pass
                 else:
                     if key1_was_down and not key1_toggle_fired:
                         # released before hold threshold — switch camera on release
@@ -2124,6 +2148,12 @@ def main():
                         veh_ctrl_mode["Opponent_Vehicle"] = _new
                         print(f"\n[Control] Opponent_Vehicle → {_new}")
                         key2_toggle_fired = True
+                        if _ros_bridge_enabled and _drive_proc is not None:
+                            try:
+                                _drive_proc.stdin.write(f"ctrl_mode\tOpponent_Vehicle\t{1 if _new == 'ROS2_CONTROL' else 0}\n")
+                                _drive_proc.stdin.flush()
+                            except Exception:
+                                pass
                 else:
                     if key2_was_down and not key2_toggle_fired:
                         # released before hold threshold — switch camera on release
@@ -2463,8 +2493,11 @@ def main():
 
         # ── Terminal status: two in-place lines (ego + opponent) ──────────────
         if iteration % max(1, app_freq // 10) == 0:
-            _wall_elapsed = time.monotonic() - _rt_wall_start
-            _rt_pct = (iteration * _rt_sim_dt / _wall_elapsed * 100.0) if _wall_elapsed > 0 else 100.0
+            _rt_now = time.monotonic()
+            _rt_wall_dt = _rt_now - _rt_wall_last
+            _rt_pct = (((iteration - _rt_iter_last) * _rt_sim_dt / _rt_wall_dt) * 100.0) if _rt_wall_dt > 0 else 100.0
+            _rt_wall_last = _rt_now
+            _rt_iter_last = iteration
             _status_lines = []
             for _sv, (_ss, _sstr) in _hud_cmds.items():
                 _smode = "KBD" if veh_ctrl_mode.get(_sv, "KEYBOARD_CONTROL") == "KEYBOARD_CONTROL" else "ROS"

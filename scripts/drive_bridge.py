@@ -11,6 +11,7 @@ stdin protocol (one command per line):
   After 'start' (late commands, e.g. map data ready after physics warmup):
     map<TAB>width<TAB>height<TAB>resolution<TAB>orig_x<TAB>orig_y<TAB>data_b64
     tf<TAB>parent_frame<TAB>child_frame
+    ctrl_mode<TAB>veh_name<TAB>value  -- publish control mode (0=KEYBOARD_CONTROL, 1=ROS2_CONTROL)
 
 stdout protocol:
   ready                                           -- node is up and subscriptions registered
@@ -51,6 +52,7 @@ except Exception as _e:
 _pending_subs = []   # list of (veh_name, drive_topic, control_topic)
 _pending_maps = []   # list of raw parts [width, height, res, ox, oy, b64]
 _pending_tfs  = []   # list of (parent_frame, child_frame)
+_ctrl_mode_pubs = {}  # veh_name -> rclpy Publisher<Int32>
 
 # ── Phase 1: read registrations from stdin until "start" ──────────────────────
 for _line in sys.stdin:
@@ -105,6 +107,13 @@ for _vn, _dt, _ct in _pending_subs:
         sys.stderr.write(f"[drive_bridge] {_vn}: subscribed '{_ct}' [autoware_control_msgs/Control] → republish on '{_dt}'\n")
     except Exception as _e:
         sys.stderr.write(f"[drive_bridge] {_vn}: autoware_control_msgs/Control failed: {_e}\n")
+    try:
+        from std_msgs.msg import Int32 as _Int32
+        _cm_topic = _dt.rsplit("/", 1)[0] + "/control_mode"
+        _ctrl_mode_pubs[_vn] = _node.create_publisher(_Int32, _cm_topic, 10)
+        sys.stderr.write(f"[drive_bridge] {_vn}: control_mode publisher on '{_cm_topic}'\n")
+    except Exception as _e:
+        sys.stderr.write(f"[drive_bridge] {_vn}: control_mode publisher failed: {_e}\n")
 
 # ── Phase 3: start spinning in background thread ───────────────────────────────
 _spin_thread = threading.Thread(target=rclpy.spin, args=(_node,), daemon=True)
@@ -188,6 +197,16 @@ try:
             _publish_map(_parts[1:])
         elif _cmd == "tf" and len(_parts) == 3:
             _publish_tf(_parts[1], _parts[2])
+        elif _cmd == "ctrl_mode" and len(_parts) == 3:
+            try:
+                from std_msgs.msg import Int32 as _Int32
+                _cmvn, _cmval = _parts[1], int(_parts[2])
+                if _cmvn in _ctrl_mode_pubs:
+                    _cm_msg = _Int32()
+                    _cm_msg.data = _cmval
+                    _ctrl_mode_pubs[_cmvn].publish(_cm_msg)
+            except Exception as _e:
+                sys.stderr.write(f"[drive_bridge] ctrl_mode publish failed: {_e}\n")
 except Exception:
     pass
 

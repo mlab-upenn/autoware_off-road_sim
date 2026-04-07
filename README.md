@@ -272,6 +272,17 @@ Each vehicle exposes two separate command topics — one per message type. The v
 | GNSS | `/ego/gnss` | `/opponent/gnss` | `sensor_msgs/NavSatFix` |
 | TF | `/tf` | `/tf` | `tf2_msgs/TFMessage` |
 
+### Control Mode Status
+
+Each vehicle publishes its active control mode as a `std_msgs/Int32` topic:
+
+| Vehicle | Topic | Value |
+|---|---|---|
+| Ego | `/ego/control_mode` | `0` = `KEYBOARD_CONTROL`, `1` = `ROS2_CONTROL` |
+| Opponent | `/opponent/control_mode` | `0` = `KEYBOARD_CONTROL`, `1` = `ROS2_CONTROL` |
+
+The topic is updated immediately whenever the control mode changes (hold `1` / `2` for ≥1 s), at simulation startup, and after a restart (`Backspace`).
+
 ---
 
 ## Control Interface
@@ -616,7 +627,7 @@ Disabling shadows, ambient occlusion, and reflections could help improve the GPU
 |---|---|
 | `scripts/launch_sim.py` | Main simulation launcher (load USD, spawn vehicles, start keyboard control, record segmentation) |
 | `scripts/gnss_bridge.py` | Python 3.10 subprocess that publishes `sensor_msgs/NavSatFix` via rclpy (spawned automatically) |
-| `scripts/drive_bridge.py` | Python 3.10 subprocess that subscribes to per-vehicle `AckermannDriveStamped` and `autoware_control_msgs/Control` drive topics, forwarding commands to the Isaac Sim OmniGraph controller; also publishes `/map` and static TFs (spawned automatically) |
+| `scripts/drive_bridge.py` | Python 3.10 subprocess that subscribes to per-vehicle `AckermannDriveStamped` and `autoware_control_msgs/Control` drive topics, forwarding commands to the Isaac Sim OmniGraph controller; also publishes `/map`, static TFs, and per-vehicle `control_mode` status (`std_msgs/Int32`) (spawned automatically) |
 
 ---
 
