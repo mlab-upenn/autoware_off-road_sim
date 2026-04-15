@@ -49,7 +49,7 @@ The container builds [NVIDIA Isaac Sim](https://github.com/isaac-sim/IsaacSim) f
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/mlab-upenn/autoware_off-road_sim
+git clone https://github.com/autowarefoundation/autoware_off-road_sim
 cd autoware_off-road_sim
 ```
 
